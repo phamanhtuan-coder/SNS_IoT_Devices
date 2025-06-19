@@ -17,7 +17,8 @@ const char* WIFI_SSID = "Anh Tuan";
 const char* WIFI_PASSWORD = "21032001";
 
 // Server configuration
-String WEBSOCKET_HOST = "192.168.51.115";
+// String WEBSOCKET_HOST = "192.168.51.115";
+String WEBSOCKET_HOST = "192.168.1.7";
 uint16_t WEBSOCKET_PORT = 7777;
 String WEBSOCKET_PATH = "/socket.io/?EIO=3&transport=websocket&serialNumber=" + String(SERIAL_NUMBER) + "&isIoTDevice=true";
 
@@ -77,6 +78,19 @@ struct EffectState {
   unsigned long lastDebugTime = 0;
   bool effectInitialized = false;
   String lastEffect = "";
+  int colorWaveOffset = 0;
+  int discoColorIndex = 0;
+  int rainbowMoveStep = 0;
+  int meteorPos = 0;
+  int meteorTail = 5;
+  float pulsePhase = 0;
+  int wavePosition = 0;
+  bool meteorDirection = true;
+  unsigned long lastDiscoChange = 0;
+  int twinklePixels[24] = {0};
+  int fireworksCenter = 0;
+  bool fireworksExpanding = true;
+  int fireworksRadius = 0;
 } effectState;
 
 // Function declarations
@@ -456,6 +470,7 @@ void updateLED() {
 void resetEffectState() {
   Serial.println("[EFFECT] Resetting effect state");
   
+  // Original state reset
   effectState.blinkCount = 0;
   effectState.blinkOn = false;
   effectState.chaseStep = 0;
@@ -468,8 +483,23 @@ void resetEffectState() {
   effectState.effectInitialized = false;
   effectState.lastEffect = "";
   
+  // New enhanced effect state reset
+  effectState.colorWaveOffset = 0;
+  effectState.discoColorIndex = 0;
+  effectState.rainbowMoveStep = 0;
+  effectState.meteorPos = 0;
+  effectState.meteorTail = 5;
+  effectState.pulsePhase = 0;
+  effectState.wavePosition = 0;
+  effectState.meteorDirection = true;
+  effectState.lastDiscoChange = 0;
+  effectState.fireworksCenter = 0;
+  effectState.fireworksExpanding = true;
+  effectState.fireworksRadius = 0;
+  
   for (int i = 0; i < NUMPIXELS; i++) {
     effectState.lastSparklePixels[i] = 0;
+    effectState.twinklePixels[i] = 0;
   }
 }
 
@@ -538,6 +568,7 @@ void processEffects() {
     effectState.lastEffect = currentEffect;
   }
   
+  // Original effects with timing
   if (currentEffect == "blink" && (currentTime - lastEffectUpdate) >= effectSpeed) {
     processBlink();
     lastEffectUpdate = currentTime;
@@ -563,6 +594,34 @@ void processEffects() {
   }
   else if (currentEffect == "sparkle" && (currentTime - lastEffectUpdate) >= effectSpeed) {
     processSparkle();
+    lastEffectUpdate = currentTime;
+  }
+  // NEW ENHANCED EFFECTS
+  else if (currentEffect == "colorWave" && (currentTime - lastEffectUpdate) >= effectSpeed) {
+    processColorWave();
+    lastEffectUpdate = currentTime;
+  }
+  else if (currentEffect == "rainbowMove" && (currentTime - lastEffectUpdate) >= effectSpeed) {
+    processRainbowMove();
+    lastEffectUpdate = currentTime;
+  }
+  else if (currentEffect == "disco" && (currentTime - lastEffectUpdate) >= max(50, effectSpeed/4)) {
+    processDisco();
+    lastEffectUpdate = currentTime;
+  }
+  else if (currentEffect == "meteor" && (currentTime - lastEffectUpdate) >= effectSpeed) {
+    processMeteor();
+    lastEffectUpdate = currentTime;
+  }
+  else if (currentEffect == "pulse") {
+    processPulse();
+  }
+  else if (currentEffect == "twinkle" && (currentTime - lastEffectUpdate) >= effectSpeed) {
+    processTwinkle();
+    lastEffectUpdate = currentTime;
+  }
+  else if (currentEffect == "fireworks" && (currentTime - lastEffectUpdate) >= effectSpeed) {
+    processFireworks();
     lastEffectUpdate = currentTime;
   }
 }
@@ -667,7 +726,45 @@ void processFade() {
 }
 
 void processStrobe() {
-  processBlink();
+  int brightnessScaled = map(ledBrightness, 0, 100, 0, 255);
+  strip.setBrightness(brightnessScaled);
+  
+  // Strobe is much faster and more intense than blink
+  // Uses very short on/off cycles for dramatic effect
+  unsigned long strobeSpeed = max(30, effectSpeed / 8); // Much faster than blink
+  unsigned long currentTime = millis();
+  
+  // Ultra-fast on/off pattern
+  bool strobeOn = ((currentTime / strobeSpeed) % 2) == 0;
+  
+  if (strobeOn) {
+    // Full intensity white flash or specified color
+    uint32_t strobeColor = hexToColor(effectColor1);
+    for (int i = 0; i < NUMPIXELS; i++) {
+      strip.setPixelColor(i, strobeColor);
+    }
+  } else {
+    // Complete darkness between flashes
+    for (int i = 0; i < NUMPIXELS; i++) {
+      strip.setPixelColor(i, 0, 0, 0);
+    }
+  }
+  
+  strip.show();
+  
+  // Count strobe flashes for effect termination
+  if (effectCount > 0) {
+    static unsigned long lastStrobeTime = 0;
+    if (currentTime - lastStrobeTime >= strobeSpeed * 2) { // Count complete on/off cycles
+      effectState.strobeCount++;
+      lastStrobeTime = currentTime;
+      
+      if (effectState.strobeCount >= effectCount) {
+        forceStopAllEffects();
+        updateLED();
+      }
+    }
+  }
 }
 
 void processSparkle() {
@@ -701,6 +798,216 @@ void processSparkle() {
   strip.show();
 }
 
+void processColorWave() {
+  int brightnessScaled = map(ledBrightness, 0, 100, 0, 255);
+  strip.setBrightness(brightnessScaled);
+  
+  uint32_t color1 = hexToColor(effectColor1);
+  uint32_t color2 = hexToColor(effectColor2);
+  
+  for (int i = 0; i < NUMPIXELS; i++) {
+    // Create wave effect using sine
+    float wave = sin((i + effectState.colorWaveOffset) * 2.0 * PI / NUMPIXELS);
+    float blend = (wave + 1.0) / 2.0; // Normalize to 0-1
+    
+    uint8_t r1 = (color1 >> 16) & 0xFF, g1 = (color1 >> 8) & 0xFF, b1 = color1 & 0xFF;
+    uint8_t r2 = (color2 >> 16) & 0xFF, g2 = (color2 >> 8) & 0xFF, b2 = color2 & 0xFF;
+    
+    uint8_t r = r1 + (r2 - r1) * blend;
+    uint8_t g = g1 + (g2 - g1) * blend;
+    uint8_t b = b1 + (b2 - b1) * blend;
+    
+    strip.setPixelColor(i, strip.Color(r, g, b));
+  }
+  
+  strip.show();
+  effectState.colorWaveOffset = (effectState.colorWaveOffset + 1) % NUMPIXELS;
+}
+
+void processRainbowMove() {
+  int brightnessScaled = map(ledBrightness, 0, 100, 0, 255);
+  strip.setBrightness(brightnessScaled);
+  
+  for (int i = 0; i < NUMPIXELS; i++) {
+    // Enhanced rainbow with movement
+    int hue = ((i * 256 / NUMPIXELS) + effectState.rainbowMoveStep) % 256;
+    strip.setPixelColor(i, wheel(hue));
+  }
+  
+  strip.show();
+  effectState.rainbowMoveStep = (effectState.rainbowMoveStep + 2) % 256; // Faster movement
+}
+
+void processDisco() {
+  int brightnessScaled = map(ledBrightness, 0, 100, 0, 255);
+  strip.setBrightness(brightnessScaled);
+  
+  unsigned long currentTime = millis();
+  
+  // Quick disco colors
+  uint32_t discoColors[] = {
+    strip.Color(255, 0, 255),   // Magenta
+    strip.Color(0, 255, 255),   // Cyan
+    strip.Color(255, 255, 0),   // Yellow
+    strip.Color(255, 0, 0),     // Red
+    strip.Color(0, 255, 0),     // Green
+    strip.Color(0, 0, 255),     // Blue
+    strip.Color(255, 127, 0),   // Orange
+    strip.Color(127, 0, 255)    // Purple
+  };
+  
+  // Change colors rapidly
+  if (currentTime - effectState.lastDiscoChange > (effectSpeed / 4)) {
+    effectState.discoColorIndex = (effectState.discoColorIndex + 1) % 8;
+    effectState.lastDiscoChange = currentTime;
+  }
+  
+  // Random flashing pattern
+  for (int i = 0; i < NUMPIXELS; i++) {
+    if (random(100) < 70) { // 70% chance to light up
+      int colorIndex = (effectState.discoColorIndex + i) % 8;
+      strip.setPixelColor(i, discoColors[colorIndex]);
+    } else {
+      strip.setPixelColor(i, 0, 0, 0);
+    }
+  }
+  
+  strip.show();
+}
+
+void processMeteor() {
+  int brightnessScaled = map(ledBrightness, 0, 100, 0, 255);
+  strip.setBrightness(brightnessScaled);
+  
+  // Fade all pixels
+  for (int i = 0; i < NUMPIXELS; i++) {
+    uint32_t color = strip.getPixelColor(i);
+    uint8_t r = ((color >> 16) & 0xFF) * 0.85;
+    uint8_t g = ((color >> 8) & 0xFF) * 0.85;
+    uint8_t b = (color & 0xFF) * 0.85;
+    strip.setPixelColor(i, strip.Color(r, g, b));
+  }
+  
+  // Draw meteor
+  uint32_t meteorColor = hexToColor(effectColor1);
+  strip.setPixelColor(effectState.meteorPos, meteorColor);
+  
+  // Draw tail
+  for (int i = 1; i <= effectState.meteorTail; i++) {
+    int tailPos = effectState.meteorPos - i;
+    if (tailPos < 0) tailPos += NUMPIXELS;
+    
+    uint8_t r = ((meteorColor >> 16) & 0xFF) * (1.0 - (float)i / effectState.meteorTail);
+    uint8_t g = ((meteorColor >> 8) & 0xFF) * (1.0 - (float)i / effectState.meteorTail);
+    uint8_t b = (meteorColor & 0xFF) * (1.0 - (float)i / effectState.meteorTail);
+    
+    strip.setPixelColor(tailPos, strip.Color(r, g, b));
+  }
+  
+  strip.show();
+  
+  if (effectState.meteorDirection) {
+    effectState.meteorPos = (effectState.meteorPos + 1) % NUMPIXELS;
+  } else {
+    effectState.meteorPos = (effectState.meteorPos - 1 + NUMPIXELS) % NUMPIXELS;
+  }
+  
+  // Change direction occasionally
+  if (random(100) < 5) {
+    effectState.meteorDirection = !effectState.meteorDirection;
+  }
+}
+
+void processPulse() {
+  float pulseValue = (sin(effectState.pulsePhase) + 1.0) / 2.0; // 0-1
+  
+  int baseBrightness = map(ledBrightness, 0, 100, 0, 255);
+  int pulseBrightness = (int)(baseBrightness * (0.3 + pulseValue * 0.7));
+  
+  strip.setBrightness(pulseBrightness);
+  
+  uint32_t color = hexToColor(effectColor1);
+  for (int i = 0; i < NUMPIXELS; i++) {
+    strip.setPixelColor(i, color);
+  }
+  
+  strip.show();
+  effectState.pulsePhase += 0.1;
+  if (effectState.pulsePhase >= 2 * PI) effectState.pulsePhase = 0;
+}
+
+void processTwinkle() {
+  int brightnessScaled = map(ledBrightness, 0, 100, 0, 255);
+  strip.setBrightness(brightnessScaled);
+  
+  // Fade all pixels
+  for (int i = 0; i < NUMPIXELS; i++) {
+    if (effectState.twinklePixels[i] > 0) {
+      effectState.twinklePixels[i] = effectState.twinklePixels[i] * 0.9;
+      
+      uint32_t baseColor = hexToColor(effectColor1);
+      uint8_t r = ((baseColor >> 16) & 0xFF) * effectState.twinklePixels[i] / 255;
+      uint8_t g = ((baseColor >> 8) & 0xFF) * effectState.twinklePixels[i] / 255;
+      uint8_t b = (baseColor & 0xFF) * effectState.twinklePixels[i] / 255;
+      
+      strip.setPixelColor(i, strip.Color(r, g, b));
+    } else {
+      strip.setPixelColor(i, 0, 0, 0);
+    }
+  }
+  
+  // Add new twinkles
+  if (random(100) < 40) {
+    int pixel = random(NUMPIXELS);
+    effectState.twinklePixels[pixel] = 255;
+  }
+  
+  strip.show();
+}
+
+void processFireworks() {
+  int brightnessScaled = map(ledBrightness, 0, 100, 0, 255);
+  strip.setBrightness(brightnessScaled);
+  
+  // Clear all
+  for (int i = 0; i < NUMPIXELS; i++) {
+    strip.setPixelColor(i, 0, 0, 0);
+  }
+  
+  // Draw firework explosion
+  uint32_t color = (random(2) == 0) ? hexToColor(effectColor1) : hexToColor(effectColor2);
+  
+  for (int i = 0; i < NUMPIXELS; i++) {
+    int distance = abs(i - effectState.fireworksCenter);
+    if (distance <= effectState.fireworksRadius) {
+      float intensity = 1.0 - (float)distance / effectState.fireworksRadius;
+      
+      uint8_t r = ((color >> 16) & 0xFF) * intensity;
+      uint8_t g = ((color >> 8) & 0xFF) * intensity;
+      uint8_t b = (color & 0xFF) * intensity;
+      
+      strip.setPixelColor(i, strip.Color(r, g, b));
+    }
+  }
+  
+  strip.show();
+  
+  // Update firework animation
+  if (effectState.fireworksExpanding) {
+    effectState.fireworksRadius++;
+    if (effectState.fireworksRadius > NUMPIXELS / 2) {
+      effectState.fireworksExpanding = false;
+    }
+  } else {
+    effectState.fireworksRadius--;
+    if (effectState.fireworksRadius <= 0) {
+      effectState.fireworksExpanding = true;
+      effectState.fireworksCenter = random(NUMPIXELS);
+      effectState.fireworksRadius = 0;
+    }
+  }
+}
+
 uint32_t wheel(byte wheelPos) {
   wheelPos = 255 - wheelPos;
   if (wheelPos < 85) {
@@ -722,44 +1029,80 @@ void applyPreset(String presetName, int duration) {
   if (presetName == "party_mode") {
     ledColor = "#FF0000";
     ledBrightness = 100;
-    setLEDEffect("rainbow", 200, 0, duration, "#FF0000", "#0000FF");
-  } else if (presetName == "relaxation_mode") {
-    ledColor = "#9370DB";
-    ledBrightness = 100;
-    setLEDEffect("breathe", 3000, 0, duration, "#9370DB", "#9370DB");
-  } else if (presetName == "gaming_mode") {
+    setLEDEffect("disco", 100, 0, duration, "#FF0000", "#00FF00"); // Fast disco
+  } 
+  else if (presetName == "relaxation_mode") {
+    ledColor = "#6A5ACD";
+    ledBrightness = 70;
+    setLEDEffect("pulse", 4000, 0, duration, "#6A5ACD", "#9370DB"); // Gentle pulse
+  } 
+  else if (presetName == "gaming_mode") {
     ledColor = "#00FF80";
     ledBrightness = 100;
-    setLEDEffect("chase", 150, 0, duration, "#00FF80", "#FF0080");
-  } else if (presetName == "alarm_mode") {
+    setLEDEffect("colorWave", 300, 0, duration, "#00FF80", "#FF0080"); // Dynamic wave
+  } 
+  else if (presetName == "alarm_mode") {
     ledColor = "#FF0000";
     ledBrightness = 100;
-    setLEDEffect("strobe", 200, 20, duration, "#FF0000", "#FF0000");
-  } else if (presetName == "sleep_mode") {
-    ledColor = "#FFB366";
-    ledBrightness = 100;
-    setLEDEffect("fade", 4000, 0, duration, "#FFB366", "#2F1B14");
-  } else if (presetName == "wake_up_mode") {
-    ledColor = "#330000";
-    ledBrightness = 100;
-    setLEDEffect("fade", 2000, 0, duration, "#330000", "#FFB366");
-  } else if (presetName == "focus_mode") {
-    ledColor = "#4169E1";
-    ledBrightness = 100;
-    setLEDEffect("solid", 0, 0, duration, "#4169E1", "#4169E1");
-  } else if (presetName == "movie_mode") {
-    ledColor = "#000080";
-    ledBrightness = 100;
-    setLEDEffect("breathe", 5000, 0, duration, "#000080", "#000080");
-  } else if (presetName == "romantic_mode") {
-    ledColor = "#FF1493";
-    ledBrightness = 100;
-    setLEDEffect("fade", 2000, 0, duration, "#FF1493", "#FF69B4");
-  } else if (presetName == "celebration_mode") {
+    setLEDEffect("strobe", 150, 20, duration, "#FF0000", "#FFFFFF"); // Emergency strobe
+  } 
+  else if (presetName == "sleep_mode") {
+    ledColor = "#FF8C69";
+    ledBrightness = 30;
+    setLEDEffect("breathe", 6000, 0, duration, "#FF8C69", "#2F1B14"); // Very slow breathe
+  } 
+  else if (presetName == "wake_up_mode") {
+    ledColor = "#FFE4B5";
+    ledBrightness = 80;
+    setLEDEffect("fade", 3000, 0, duration, "#330000", "#FFE4B5"); // Sunrise simulation
+  } 
+  else if (presetName == "focus_mode") {
+    ledColor = "#87CEEB";
+    ledBrightness = 85;
+    setLEDEffect("solid", 0, 0, duration, "#87CEEB", "#87CEEB"); // Sky blue
+  } 
+  else if (presetName == "movie_mode") {
+    ledColor = "#191970";
+    ledBrightness = 40;
+    setLEDEffect("breathe", 8000, 0, duration, "#191970", "#483D8B"); // Dark blue breathe
+  } 
+  else if (presetName == "romantic_mode") {
+    ledColor = "#FF69B4";
+    ledBrightness = 60;
+    setLEDEffect("twinkle", 800, 0, duration, "#FF69B4", "#FF1493"); // Romantic twinkle
+  } 
+  else if (presetName == "celebration_mode") {
     ledColor = "#FFD700";
     ledBrightness = 100;
-    setLEDEffect("sparkle", 200, 0, duration, "#FFD700", "#FFFFFF");
-  } else {
+    setLEDEffect("fireworks", 400, 0, duration, "#FFD700", "#FF4500"); // Celebration fireworks
+  }
+  // NEW ENHANCED PRESETS
+  else if (presetName == "rainbow_dance") {
+    ledColor = "#FF0000";
+    ledBrightness = 100;
+    setLEDEffect("rainbowMove", 150, 0, duration, "#FF0000", "#0000FF"); // Fast moving rainbow
+  }
+  else if (presetName == "ocean_wave") {
+    ledColor = "#0077BE";
+    ledBrightness = 80;
+    setLEDEffect("colorWave", 600, 0, duration, "#0077BE", "#40E0D0"); // Ocean colors
+  }
+  else if (presetName == "meteor_shower") {
+    ledColor = "#FFFFFF";
+    ledBrightness = 90;
+    setLEDEffect("meteor", 200, 0, duration, "#FFFFFF", "#87CEEB"); // White meteors
+  }
+  else if (presetName == "christmas_mode") {
+    ledColor = "#FF0000";
+    ledBrightness = 100;
+    setLEDEffect("colorWave", 500, 0, duration, "#FF0000", "#00FF00"); // Red-Green wave
+  }
+  else if (presetName == "disco_fever") {
+    ledColor = "#FF00FF";
+    ledBrightness = 100;
+    setLEDEffect("disco", 80, 0, duration, "#FF00FF", "#00FFFF"); // Ultra-fast disco
+  }
+  else {
     Serial.printf("[PRESET] Unknown preset '%s', using default\n", presetName.c_str());
     ledColor = "#FFFFFF";
     ledBrightness = 100;
