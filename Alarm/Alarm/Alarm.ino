@@ -20,13 +20,14 @@ const char* WIFI_PASSWORD = "21032001";
 // Server configuration
 String WEBSOCKET_HOST = "192.168.51.115";
 uint16_t WEBSOCKET_PORT = 7777;
-String WEBSOCKET_PATH = "/socket.io/?EIO=3&transport=websocket&deviceId=" + String(SERIAL_NUMBER) + "&isIoTDevice=true";
+String WEBSOCKET_PATH = "/socket.io/?EIO=3&transport=websocket&serialNumber=" + String(SERIAL_NUMBER) + "&isIoTDevice=true";
 
 // Hardware
 WebSocketsClient webSocket;
 Adafruit_AHTX0 aht;
 
 #define MQ2_PIN A0
+#define BUZZER_PIN_N D8
 #define BUZZER_PIN D5
 
 // Timing variables
@@ -812,6 +813,8 @@ void setup() {
   // Initialize hardware
   pinMode(MQ2_PIN, INPUT);
   pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(BUZZER_PIN_N, OUTPUT);
+  digitalWrite(BUZZER_PIN_N, LOW);
   digitalWrite(BUZZER_PIN, LOW);
   
   // Initialize I2C and sensor

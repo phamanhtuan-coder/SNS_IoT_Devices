@@ -13,12 +13,12 @@
 #include <Adafruit_NeoPixel.h>
 
 // WiFi credentials
-const char* WIFI_SSID = "Anh Tuan";
-const char* WIFI_PASSWORD = "21032001";
+const char* WIFI_SSID = "t";
+const char* WIFI_PASSWORD = "123456789";
 
 // Server configuration
-// String WEBSOCKET_HOST = "192.168.51.115";
-String WEBSOCKET_HOST = "192.168.1.7";
+String WEBSOCKET_HOST = "192.168.176.180";
+//String WEBSOCKET_HOST = "192.168.1.7";
 uint16_t WEBSOCKET_PORT = 7777;
 String WEBSOCKET_PATH = "/socket.io/?EIO=3&transport=websocket&serialNumber=" + String(SERIAL_NUMBER) + "&isIoTDevice=true";
 
