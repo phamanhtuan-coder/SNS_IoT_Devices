@@ -5,30 +5,35 @@
 const char* WIFI_SSID = "Anh Tuan";
 const char* WIFI_PASSWORD = "21032001";
 String WEBSOCKET_HOST = "iothomeconnectapiv2-production.up.railway.app";
-uint16_t WEBSOCKET_PORT = 443;  // ✅ Thay đổi từ 7777 sang 443 cho HTTPS
-String DEVICE_SERIAL = "SERL27JUN2501JYR2RKVVX08V40YMGTW";
-#define FIRMWARE_VERSION "3.0.3"
+uint16_t WEBSOCKET_PORT = 443;
+
+// ✅ HUB IDENTITY - This hub connects as itself and manages other devices
+String HUB_SERIAL = "SERL29JUN2501JYXECBR32V8BD77RW82"; // Hub Socket Mô Hình 
+#define FIRMWARE_VERSION "3.0.4"
 #define HUB_ID "ESP_HUB_001"
 
 WebSocketsClient webSocket;
 bool socketConnected = false;
 unsigned long lastPingResponse = 0;
 
-// ✅ FIX: Add missing global variables
+// ✅ ENHANCED: Action tracking for better command handling
 String lastClientAction = "toggle_door";
 unsigned long lastActionTime = 0;
+String lastTargetSerial = "";
 
 void setup() {
   Serial.begin(115200);
   delay(2000);
   
-  Serial.println("\n=== ESP Socket Hub v3.0.3 FIXED ===");
+  Serial.println("\n=== ESP Socket Hub v3.0.4 - DYNAMIC 7 DOORS ===");
+  Serial.println("Hub Serial: " + HUB_SERIAL);
   Serial.println("Hub ID: " + String(HUB_ID));
+  Serial.println("Mode: Dynamic Device Discovery via Database");
   
   setupWiFi();
   setupWebSocket();
   
-  Serial.println("[INIT] Socket Hub Ready");
+  Serial.println("[INIT] Socket Hub Ready - Dynamic Mode");
 }
 
 void setupWiFi() {
@@ -56,20 +61,19 @@ void setupWiFi() {
 void setupWebSocket() {
   Serial.println("[WS] Setting up WebSocket...");
 
-
-  
+  // ✅ Connect as the hub itself
   String path = "/socket.io/?EIO=3&transport=websocket&serialNumber=" + 
-                DEVICE_SERIAL + "&isIoTDevice=true&hub_managed=true";
+                HUB_SERIAL + "&isIoTDevice=true&hub_managed=true";
   webSocket.beginSSL(WEBSOCKET_HOST.c_str(), WEBSOCKET_PORT, path.c_str());
   webSocket.onEvent(webSocketEvent);
   webSocket.setReconnectInterval(3000);
-  webSocket.enableHeartbeat(25000, 5000, 2);  // 25s ping, 5s timeout, 2 retries
+  webSocket.enableHeartbeat(25000, 5000, 2);
   
-  String userAgent = "ESP-Hub/3.0.3";
+  String userAgent = "ESP-Hub/3.0.4-Dynamic";
   String headers = "User-Agent: " + userAgent;
   webSocket.setExtraHeaders(headers.c_str());
   
-  Serial.println("[WS] WebSocket initialized for: " + DEVICE_SERIAL);
+  Serial.println("[WS] WebSocket initialized as Hub: " + HUB_SERIAL);
 }
 
 void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
@@ -80,7 +84,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
       break;
       
     case WStype_CONNECTED:
-      Serial.println("[WS] CONNECTED");
+      Serial.println("[WS] CONNECTED as Hub: " + HUB_SERIAL);
       socketConnected = true;
       lastPingResponse = millis();
       sendDeviceOnline();
@@ -144,74 +148,55 @@ void handleSocketIOEvent(String eventData) {
   Serial.println("[EVENT] Raw data: " + eventData);
   
   if (eventData.indexOf("connection_welcome") != -1) {
-    Serial.println("[EVENT] Welcome received");
-    String ackPayload = "42[\"welcome_ack\",{\"received\":true,\"hub_managed\":true}]";
+    Serial.println("[EVENT] Welcome received for Hub");
+    String ackPayload = "42[\"welcome_ack\",{\"received\":true,\"hub_managed\":true,\"dynamic_discovery\":true}]";
     webSocket.sendTXT(ackPayload);
     
   } else if (eventData.indexOf("command") != -1) {
     Serial.println("[CMD] Command received: " + eventData);
     
-    // ✅ QUICK FIX: Check for action field in JSON
-    if (eventData.indexOf("\"action\"") != -1) {
-      // Extract action from enhanced command format
-      if (eventData.indexOf("open_door") != -1) {
-        Serial.println("[CMD] ✓ Action: open_door");
-        Serial.println("CMD:open_door");
-      } else if (eventData.indexOf("close_door") != -1) {
-        Serial.println("[CMD] ✓ Action: close_door"); 
-        Serial.println("CMD:close_door");
-      } else if (eventData.indexOf("toggle_door") != -1) {
-        Serial.println("[CMD] ✓ Action: toggle_door");
-        Serial.println("CMD:toggle_door");
-      } else {
-        Serial.println("[CMD] ✓ Default action: toggle_door");
-        Serial.println("CMD:toggle_door");
-      }
-    } else {
-      // Fallback for old format
-      parseAndExecuteCommand(eventData);
-    }
+    // ✅ ENHANCED: Parse command with target device support
+    parseAndExecuteEnhancedCommand(eventData);
     
   } else if (eventData.indexOf("ping") != -1) {
     Serial.println("[PING] Socket.IO ping");
-    String pongPayload = "42[\"pong\",{\"timestamp\":" + String(millis()) + "}]";
+    String pongPayload = "42[\"pong\",{\"timestamp\":" + String(millis()) + ",\"hub_serial\":\"" + HUB_SERIAL + "\"}]";
     webSocket.sendTXT(pongPayload);
     lastPingResponse = millis();
     
   } else if (eventData.indexOf("door_command") != -1) {
-    // Listen for original client command to extract action
     Serial.println("[CLIENT] Door command detected: " + eventData);
     extractClientAction(eventData);
   }
 }
 
 void extractClientAction(String eventData) {
-  // Extract action from client command for later use
   int startIdx = eventData.indexOf("{");
   int endIdx = eventData.lastIndexOf("}");
   
   if (startIdx != -1 && endIdx != -1) {
     String jsonString = eventData.substring(startIdx, endIdx + 1);
     
-    // ✅ FIX: Use JsonDocument instead of DynamicJsonDocument
     JsonDocument doc;
     if (deserializeJson(doc, jsonString) == DeserializationError::Ok) {
-      // ✅ FIX: Use modern ArduinoJson syntax
       if (doc["action"].is<String>()) {
         lastClientAction = doc["action"].as<String>();
         lastActionTime = millis();
         Serial.println("[CLIENT] Action stored: " + lastClientAction);
       }
+      
+      if (doc["serialNumber"].is<String>()) {
+        lastTargetSerial = doc["serialNumber"].as<String>();
+        Serial.println("[CLIENT] Target stored: " + lastTargetSerial);
+      }
     }
   }
 }
 
-void parseAndExecuteCommand(String eventData) {
-  // Parse JSON command properly
-  Serial.println("[PARSE] Parsing command...");
-  Serial.println("[PARSE] Full event: " + eventData);
+// ✅ ENHANCED: Parse command with dynamic target device support
+void parseAndExecuteEnhancedCommand(String eventData) {
+  Serial.println("[PARSE] Enhanced command parsing (Dynamic Mode)...");
   
-  // Extract JSON from Socket.IO format: ["command",{...}]
   int startIdx = eventData.indexOf("{");
   int endIdx = eventData.lastIndexOf("}");
   
@@ -223,7 +208,6 @@ void parseAndExecuteCommand(String eventData) {
   String jsonString = eventData.substring(startIdx, endIdx + 1);
   Serial.println("[PARSE] JSON: " + jsonString);
   
-  // ✅ FIX: Use JsonDocument instead of DynamicJsonDocument
   JsonDocument doc;
   DeserializationError error = deserializeJson(doc, jsonString);
   
@@ -232,79 +216,86 @@ void parseAndExecuteCommand(String eventData) {
     return;
   }
   
-  // ✅ FIX: Check if this is esp01_safe command (server strips action)
+  // ✅ ENHANCED: Extract target device serial number
+  String targetSerial = "";
+  if (doc["serialNumber"].is<String>()) {
+    targetSerial = doc["serialNumber"].as<String>();
+  }
+  
+  // ✅ ENHANCED: Extract action with fallback logic
+  String action = "";
+  
   if (doc["esp01_safe"].is<bool>() && doc["esp01_safe"] == true) {
     Serial.println("[CMD] ✓ ESP01 safe command detected");
     
-    String action = "toggle_door"; // Default fallback
+    action = "toggle_door"; // Default fallback
     
-    // Use stored client action if recent (within 5 seconds)
+    // Use stored client action if recent
     if (millis() - lastActionTime < 5000 && lastClientAction != "") {
       action = lastClientAction;
       Serial.println("[CMD] Using stored client action: " + action);
     }
     
-    // ✅ FIX: Try to get action from a hidden field
+    // Try to get action from command
     if (doc["action"].is<String>()) {
       action = doc["action"].as<String>();
-    } else if (doc["command_type"].is<String>()) {
-      action = doc["command_type"].as<String>();
     }
     
-    Serial.println("[CMD] ✓ Final action: " + action);
-    Serial.println("CMD:" + action); // Send to Master via Serial
+  } else {
+    // Extract action from standard format
+    if (doc["action"].is<String>()) {
+      action = doc["action"].as<String>();
+    }
+  }
+  
+  // ✅ ENHANCED: Use stored target if not in current command
+  if (targetSerial == "" && lastTargetSerial != "" && millis() - lastActionTime < 5000) {
+    targetSerial = lastTargetSerial;
+    Serial.println("[CMD] Using stored target: " + targetSerial);
+  }
+  
+  // ✅ CRITICAL: Validate target device is managed by this hub
+  if (targetSerial == "") {
+    Serial.println("[CMD] ✗ No target device specified");
     return;
   }
   
-  // Extract action from standard format
-  String action = "";
-  if (doc["action"].is<String>()) {
-    action = doc["action"].as<String>();
+  if (action == "") {
+    action = "toggle_door";
+    Serial.println("[CMD] No action specified, using default: toggle_door");
   }
   
-  if (action != "") {
-    Serial.println("[CMD] ✓ Action extracted: " + action);
-    Serial.println("CMD:" + action); // Send to Master via Serial
-  } else {
-    Serial.println("[CMD] ✗ No action found in command");
-    
-    // ✅ FIX: Debug using modern ArduinoJson
-    Serial.println("[DEBUG] Available keys:");
-    for (JsonPair kv : doc.as<JsonObject>()) {
-      Serial.println("  " + String(kv.key().c_str()) + ": " + String(kv.value().as<String>()));
-    }
-    
-    // Fallback: use stored action or default
-    String fallbackAction = (lastClientAction != "") ? lastClientAction : "toggle_door";
-    Serial.println("[FALLBACK] Using: " + fallbackAction);
-    Serial.println("CMD:" + fallbackAction);
-  }
+  Serial.println("[CMD] ✓ Final command: " + targetSerial + " -> " + action);
+  
+  // ✅ ENHANCED: Send command with target serial to Master
+  Serial.println("CMD:" + targetSerial + ":" + action);
 }
 
 void sendDeviceOnline() {
   if (!socketConnected) return;
   
   String json = "{";
-  json += "\"deviceId\":\"" + DEVICE_SERIAL + "\",";
-  json += "\"serialNumber\":\"" + DEVICE_SERIAL + "\",";
-  json += "\"deviceType\":\"HUB\",";
+  json += "\"deviceId\":\"" + HUB_SERIAL + "\",";
+  json += "\"serialNumber\":\"" + HUB_SERIAL + "\",";
+  json += "\"deviceType\":\"HUB_GATEWAY\",";
   json += "\"firmware_version\":\"" + String(FIRMWARE_VERSION) + "\",";
   json += "\"hub_managed\":true,";
   json += "\"hub_id\":\"" + String(HUB_ID) + "\",";
-  json += "\"connection_type\":\"hub\"";
+  json += "\"connection_type\":\"hub\",";
+  json += "\"discovery_mode\":\"dynamic\",";
+  json += "\"managed_via_database\":true";
   json += "}";
   
   String payload = "42[\"device_online\"," + json + "]";
   webSocket.sendTXT(payload);
   
-  Serial.println("[SEND] device_online sent");
+  Serial.println("[SEND] device_online sent for Hub: " + HUB_SERIAL);
 }
 
 void checkWebSocketHealth() {
   unsigned long now = millis();
   
-  // ✅ Match server timeout  
-  if (socketConnected && (now - lastPingResponse > 35000)) {  // 35s threshold
+  if (socketConnected && (now - lastPingResponse > 35000)) {
     Serial.println("[WS] Ping timeout, reconnecting...");
     webSocket.disconnect();
   }
@@ -313,28 +304,29 @@ void checkWebSocketHealth() {
 void loop() {
   webSocket.loop(); 
   
-  // ✅ Send ping every 20s to stay active
+  // Send ping every 20s to stay active
   static unsigned long lastManualPing = 0;
   if (socketConnected && millis() - lastManualPing > 20000) {
-    webSocket.sendTXT("2");  // Engine.IO ping
+    webSocket.sendTXT("2");
     lastManualPing = millis();
   }
 
-
-  
   static unsigned long lastWSCheck = 0;
   if (millis() - lastWSCheck > 15000) {
     checkWebSocketHealth();
     lastWSCheck = millis();
   }
   
-  // Xử lý phản hồi từ Master (nếu có)
+  // ✅ ENHANCED: Handle responses from Master for all managed doors
   if (Serial.available()) {
     String response = Serial.readStringUntil('\n');
     if (response.startsWith("RESP:")) {
       String json = response.substring(5);
+      
+      // Forward response with device identification
       String payload = "42[\"command_response\"," + json + "]";
       webSocket.sendTXT(payload);
+      
       Serial.println("[RESP] Forwarded to server: " + json);
     }
   }
