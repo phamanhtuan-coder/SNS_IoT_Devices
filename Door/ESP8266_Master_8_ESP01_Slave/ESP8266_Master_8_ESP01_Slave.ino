@@ -1,4 +1,4 @@
-#define FIRMWARE_VERSION "3.0.3"
+#define FIRMWARE_VERSION "3.0.4"
 #define GATEWAY_ID "ESP_GATEWAY_001"
 
 #include <ESP8266WiFi.h>
@@ -14,8 +14,14 @@ struct DoorConfig {
   unsigned long lastHeartbeatSent;
 };
 
-DoorConfig doors[1] = {
-  {"SERL27JUN2501JYR2RKVVX08V40YMGTW", {0x84, 0x0D, 0x8E, 0xA4, 0x91, 0x58}, 0, false, 0, 0}
+DoorConfig doors[7] = {
+  {"SERL27JUN2501JYR2RKVVX08V40YMGTW", {0x84, 0x0D, 0x8E, 0xA4, 0x91, 0x58}, 0, false, 0, 0},
+  {"SERL27JUN2501JYR2RKVR0SC7SJ8P8DD", {0x84, 0x0D, 0x8E, 0xA4, 0x3b, 0xe0}, 0, false, 0, 0},
+  {"SERL27JUN2501JYR2RKVRNHS46VR6AS1", {0x3c, 0x71, 0xbf, 0x39, 0x31, 0x2a}, 0, false, 0, 0},
+  {"SERL27JUN2501JYR2RKVSE2RW7KQ4KMP", {0x84, 0x0d, 0x8e, 0xa4, 0x91, 0x9c}, 0, false, 0, 0},
+  {"SERL27JUN2501JYR2RKVTBZ40JPF88WP", {0x84, 0x0d, 0x8e, 0xa4, 0x91, 0xa4}, 0, false, 0, 0},
+  {"SERL27JUN2501JYR2RKVTXNCK1GB3HBZ", {0x84, 0x0d, 0x8e, 0xa4, 0x91, 0xa4}, 0, false, 0, 0}, // chip 6 hư, thay sau
+  {"SERL27JUN2501JYR2RKVS2P6XBVF1P2E",  {0x84, 0x0d, 0x8e, 0xa4, 0x3b, 0x29}, 0, false, 0, 0},  
 };
 const int TOTAL_DOORS = 1;
 
@@ -32,11 +38,19 @@ struct ESPNowMessage {
 static ESPNowMessage sendBuffer;
 static ESPNowMessage receiveBuffer;
 
+// ✅ SAFE STRING COPY HELPER
+void safeStringCopy(char* dest, const char* src, size_t destSize) {
+  if (destSize > 0) {
+    strncpy(dest, src, destSize - 1);
+    dest[destSize - 1] = '\0';  // Ensure null termination
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(2000);
   
-  Serial.println("\n=== ESP Gateway Master v3.0.3 ===");
+  Serial.println("\n=== ESP Gateway Master v3.0.4 ===");
   Serial.println("Managing 1 ESP-01 Door Controller");
   Serial.println("Gateway ID: " + String(GATEWAY_ID));
   Serial.println("Gateway MAC: " + WiFi.macAddress());
@@ -154,9 +168,12 @@ void forwardCommandToESP01(String action) {
   }
   
   memset(&sendBuffer, 0, sizeof(sendBuffer));
-  strncpy(sendBuffer.messageType, "command", 7);
-  strncpy(sendBuffer.serialNumber, doors[0].serialNumber.c_str(), 15);
-  strncpy(sendBuffer.action, action.c_str(), 7);
+  
+  // ✅ FIXED: Use safe string copying
+  safeStringCopy(sendBuffer.messageType, "command", sizeof(sendBuffer.messageType));
+  safeStringCopy(sendBuffer.serialNumber, doors[0].serialNumber.c_str(), sizeof(sendBuffer.serialNumber));
+  safeStringCopy(sendBuffer.action, action.c_str(), sizeof(sendBuffer.action));
+  
   sendBuffer.servoAngle = 0;
   sendBuffer.success = false;
   sendBuffer.timestamp = millis();
@@ -188,11 +205,14 @@ void sendCommandResponse(String command, bool success, String result) {
 
 void sendHeartbeatToESP01() {
   memset(&sendBuffer, 0, sizeof(sendBuffer));
-  strncpy(sendBuffer.messageType, "heartbeat", 7);
-  strncpy(sendBuffer.serialNumber, doors[0].serialNumber.c_str(), 15);
+  
+  // ✅ FIXED: Use safe string copying
+  safeStringCopy(sendBuffer.messageType, "heartbeat", sizeof(sendBuffer.messageType));
+  safeStringCopy(sendBuffer.serialNumber, doors[0].serialNumber.c_str(), sizeof(sendBuffer.serialNumber));
+  safeStringCopy(sendBuffer.result, "gateway_ping", sizeof(sendBuffer.result));
+  
   sendBuffer.servoAngle = 0;
   sendBuffer.success = true;
-  strncpy(sendBuffer.result, "gateway_ping", 15);
   sendBuffer.timestamp = millis();
   
   delay(20);
@@ -239,6 +259,7 @@ void loop() {
     String cmd = Serial.readStringUntil('\n');
     if (cmd.startsWith("CMD:")) {
       String action = cmd.substring(4);
+      action.trim(); // ✅ ADDED: Remove whitespace
       forwardCommandToESP01(action);
     }
   }

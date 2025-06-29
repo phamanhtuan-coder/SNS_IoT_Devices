@@ -4,8 +4,8 @@
 
 const char* WIFI_SSID = "Anh Tuan";
 const char* WIFI_PASSWORD = "21032001";
-String WEBSOCKET_HOST = "192.168.17.115";
-uint16_t WEBSOCKET_PORT = 7777;
+String WEBSOCKET_HOST = "iothomeconnectapiv2-production.up.railway.app";
+uint16_t WEBSOCKET_PORT = 443;  // ✅ Thay đổi từ 7777 sang 443 cho HTTPS
 String DEVICE_SERIAL = "SERL27JUN2501JYR2RKVVX08V40YMGTW";
 #define FIRMWARE_VERSION "3.0.3"
 #define HUB_ID "ESP_HUB_001"
@@ -55,14 +55,15 @@ void setupWiFi() {
 
 void setupWebSocket() {
   Serial.println("[WS] Setting up WebSocket...");
+
+
   
   String path = "/socket.io/?EIO=3&transport=websocket&serialNumber=" + 
                 DEVICE_SERIAL + "&isIoTDevice=true&hub_managed=true";
-  
-  webSocket.begin(WEBSOCKET_HOST.c_str(), WEBSOCKET_PORT, path.c_str());
+  webSocket.beginSSL(WEBSOCKET_HOST.c_str(), WEBSOCKET_PORT, path.c_str());
   webSocket.onEvent(webSocketEvent);
-  webSocket.setReconnectInterval(10000);
-  webSocket.enableHeartbeat(30000, 10000, 2);
+  webSocket.setReconnectInterval(3000);
+  webSocket.enableHeartbeat(25000, 5000, 2);  // 25s ping, 5s timeout, 2 retries
   
   String userAgent = "ESP-Hub/3.0.3";
   String headers = "User-Agent: " + userAgent;
@@ -302,14 +303,24 @@ void sendDeviceOnline() {
 void checkWebSocketHealth() {
   unsigned long now = millis();
   
-  if (socketConnected && (now - lastPingResponse > 45000)) {
+  // ✅ Match server timeout  
+  if (socketConnected && (now - lastPingResponse > 35000)) {  // 35s threshold
     Serial.println("[WS] Ping timeout, reconnecting...");
     webSocket.disconnect();
   }
 }
 
 void loop() {
-  webSocket.loop();
+  webSocket.loop(); 
+  
+  // ✅ Send ping every 20s to stay active
+  static unsigned long lastManualPing = 0;
+  if (socketConnected && millis() - lastManualPing > 20000) {
+    webSocket.sendTXT("2");  // Engine.IO ping
+    lastManualPing = millis();
+  }
+
+
   
   static unsigned long lastWSCheck = 0;
   if (millis() - lastWSCheck > 15000) {
