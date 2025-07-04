@@ -23,7 +23,7 @@ DoorConfig doors[7] = {
   {"SERL27JUN2501JYR2RKVTXNCK1GB3HBZ", {0x84, 0x0d, 0x8e, 0xa4, 0x3a, 0xd2}, 5, false, 0, 0}, 
   {"SERL27JUN2501JYR2RKVS2P6XBVF1P2E", {0x84, 0x0d, 0x8e, 0xa4, 0x3b, 0x29}, 6, false, 0, 0},  
 };
-const int TOTAL_DOORS = 1;
+const int TOTAL_DOORS = 7;
 
 struct ESPNowMessage {
   char messageType[16];
@@ -38,11 +38,10 @@ struct ESPNowMessage {
 static ESPNowMessage sendBuffer;
 static ESPNowMessage receiveBuffer;
 
-// ✅ SAFE STRING COPY HELPER
 void safeStringCopy(char* dest, const char* src, size_t destSize) {
   if (destSize > 0) {
     strncpy(dest, src, destSize - 1);
-    dest[destSize - 1] = '\0';  // Ensure null termination
+    dest[destSize - 1] = '\0';
   }
 }
 
@@ -83,7 +82,6 @@ void setupESPNow() {
   esp_now_register_send_cb(onDataSent);
   esp_now_register_recv_cb(onDataReceived);
   
-  // ✅ ADD ALL 7 ESP-01 PEERS
   Serial.println("[ESP-NOW] Adding " + String(TOTAL_DOORS) + " ESP-01 peers...");
   
   for (int i = 0; i < TOTAL_DOORS; i++) {
@@ -110,7 +108,6 @@ void setupESPNow() {
   Serial.println("[ESP-NOW] Setup complete - " + String(TOTAL_DOORS) + " doors configured");
 }
 
-// ✅ FIND DOOR BY MAC ADDRESS
 int findDoorByMAC(uint8_t *mac_addr) {
   for (int i = 0; i < TOTAL_DOORS; i++) {
     if (memcmp(mac_addr, doors[i].macAddress, 6) == 0) {
@@ -120,7 +117,6 @@ int findDoorByMAC(uint8_t *mac_addr) {
   return -1;
 }
 
-// ✅ FIND DOOR BY SERIAL NUMBER
 int findDoorBySerial(String serialNumber) {
   for (int i = 0; i < TOTAL_DOORS; i++) {
     if (doors[i].serialNumber == serialNumber) {
@@ -207,19 +203,30 @@ void forwardCommandToESP01(String serialNumber, String action) {
     return;
   }
   
+  // Kiểm tra độ dài dữ liệu để tránh cắt ngắn
+  if (serialNumber.length() >= 32) {
+    Serial.println("[WARN] Serial number too long: " + serialNumber);
+    sendCommandResponse(serialNumber, action, false, "Serial number too long");
+    return;
+  }
+  if (action.length() >= 16) {
+    Serial.println("[WARN] Action too long: " + action);
+    sendCommandResponse(serialNumber, action, false, "Action too long");
+    return;
+  }
+  
   memset(&sendBuffer, 0, sizeof(sendBuffer));
   
-  // ✅ FIXED: Use safe string copying
   safeStringCopy(sendBuffer.messageType, "command", sizeof(sendBuffer.messageType));
   safeStringCopy(sendBuffer.serialNumber, serialNumber.c_str(), sizeof(sendBuffer.serialNumber));
   safeStringCopy(sendBuffer.action, action.c_str(), sizeof(sendBuffer.action));
   
-  sendBuffer.servoAngle = 0;
+  sendBuffer.servoAngle = (action == "open_door") ? 180 : 0;
   sendBuffer.success = false;
+  safeStringCopy(sendBuffer.result, "", sizeof(sendBuffer.result));
   sendBuffer.timestamp = millis();
   
-  delay(10);
-  int result = esp_now_send(doors[doorIndex].macAddress, (uint8_t*)&sendBuffer, sizeof(sendBuffer));
+  int result = esp_now_send(doors[doorIndex].macAddress, (uint8_t*)&sendBuffer, sizeof(ESPNowMessage));
   
   if (result == 0) {
     Serial.println("[ESP-NOW] ✓ Command sent to Door " + String(doorIndex + 1) + ": " + action);
@@ -230,11 +237,19 @@ void forwardCommandToESP01(String serialNumber, String action) {
 }
 
 void sendCommandResponse(String serialNumber, String command, bool success, String result) {
+  // Kiểm tra độ dài chuỗi
+  char serialBuf[32];
+  char commandBuf[16];
+  char resultBuf[32];
+  safeStringCopy(serialBuf, serialNumber.c_str(), sizeof(serialBuf));
+  safeStringCopy(commandBuf, command.c_str(), sizeof(commandBuf));
+  safeStringCopy(resultBuf, result.c_str(), sizeof(resultBuf));
+  
   String json = "{";
   json += "\"success\":" + String(success ? "true" : "false") + ",";
-  json += "\"result\":\"" + result + "\",";
-  json += "\"deviceId\":\"" + serialNumber + "\",";
-  json += "\"command\":\"" + command + "\",";
+  json += "\"result\":\"" + String(resultBuf) + "\",";
+  json += "\"deviceId\":\"" + String(serialBuf) + "\",";
+  json += "\"command\":\"" + String(commandBuf) + "\",";
   json += "\"gateway_processed\":true,";
   json += "\"servo_angle\":0,";
   json += "\"timestamp\":" + String(millis());
@@ -248,7 +263,6 @@ void sendHeartbeatToESP01(int doorIndex) {
   
   memset(&sendBuffer, 0, sizeof(sendBuffer));
   
-  // ✅ FIXED: Use safe string copying
   safeStringCopy(sendBuffer.messageType, "heartbeat", sizeof(sendBuffer.messageType));
   safeStringCopy(sendBuffer.serialNumber, doors[doorIndex].serialNumber.c_str(), sizeof(sendBuffer.serialNumber));
   safeStringCopy(sendBuffer.result, "gateway_ping", sizeof(sendBuffer.result));
@@ -257,8 +271,7 @@ void sendHeartbeatToESP01(int doorIndex) {
   sendBuffer.success = true;
   sendBuffer.timestamp = millis();
   
-  delay(20);
-  int result = esp_now_send(doors[doorIndex].macAddress, (uint8_t*)&sendBuffer, sizeof(sendBuffer));
+  int result = esp_now_send(doors[doorIndex].macAddress, (uint8_t*)&sendBuffer, sizeof(ESPNowMessage));
   if (result == 0) {
     Serial.println("[HEARTBEAT] ✓ Sent to Door " + String(doorIndex + 1));
     doors[doorIndex].lastHeartbeatSent = millis();
@@ -305,25 +318,19 @@ void printStatus() {
 }
 
 void loop() {
-  // ✅ ENHANCED: Parse command with serial number
   if (Serial.available()) {
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
     
     if (cmd.startsWith("CMD:")) {
-      // Format: CMD:serialNumber:action or CMD:action (for backward compatibility)
       String cmdData = cmd.substring(4);
-      
       int colonIndex = cmdData.indexOf(':');
       if (colonIndex > 0) {
-        // New format: CMD:serialNumber:action
         String serialNumber = cmdData.substring(0, colonIndex);
         String action = cmdData.substring(colonIndex + 1);
-        
         Serial.println("[COMMAND] Received: " + serialNumber + " -> " + action);
         forwardCommandToESP01(serialNumber, action);
       } else {
-        // Old format: CMD:action (default to first door)
         String action = cmdData;
         Serial.println("[COMMAND] Legacy format, using Door 1: " + action);
         forwardCommandToESP01(doors[0].serialNumber, action);
@@ -331,11 +338,10 @@ void loop() {
     }
   }
   
-  // ✅ ENHANCED: Round-robin heartbeat for all doors
   static unsigned long lastHeartbeat = 0;
   static int heartbeatDoorIndex = 0;
   
-  if (millis() - lastHeartbeat > 10000) { // Every 10 seconds, cycle through doors
+  if (millis() - lastHeartbeat > 10000) {
     if (doors[heartbeatDoorIndex].isOnline || 
         (millis() - doors[heartbeatDoorIndex].lastHeartbeatSent > 120000)) {
       sendHeartbeatToESP01(heartbeatDoorIndex);

@@ -81,6 +81,14 @@ unsigned long responsesForwarded = 0;
 unsigned long sensorReadings = 0;
 unsigned long systemUptime = 0;
 
+// ===== SAFE STRING COPY HELPER =====
+void safeStringCopy(char* dest, const char* src, size_t destSize) {
+  if (destSize > 0) {
+    strncpy(dest, src, destSize - 1);
+    dest[destSize - 1] = '\0';  // Ensure null termination
+  }
+}
+
 void setup() {
   // Initialize all serial ports
   Serial.begin(115200);   // Debug Output / USB
@@ -114,31 +122,23 @@ void setup() {
 void initializeSensors() {
   Serial.println("[SENSORS] Initializing garden sensors...");
   
-  // Initialize DHT
   dht.begin();
   Serial.println("[SENSORS] ✓ DHT11 initialized");
   
-  // Initialize RTC
   if (!rtc.begin()) {
     Serial.println("[SENSORS] ✗ MH RTC Module-2 not found");
   } else {
     Serial.println("[SENSORS] ✓ MH RTC Module-2 initialized");
-    
-    // Set RTC time if needed (uncomment and set once)
-    // rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
   }
   
-  // Initialize pump relay
   pinMode(PUMP_RELAY_PIN, OUTPUT);
-  digitalWrite(PUMP_RELAY_PIN, LOW);  // Pump OFF initially
+  digitalWrite(PUMP_RELAY_PIN, LOW);
   Serial.println("[SENSORS] ✓ Pump relay initialized (OFF)");
   
-  // Initialize sensor pins
   pinMode(WATER_SENSOR_PIN, INPUT);
-  pinMode(LIGHT_SENSOR_PIN, INPUT);     // Digital pin for LDR
+  pinMode(LIGHT_SENSOR_PIN, INPUT);
   pinMode(SOIL_MOISTURE_PIN, INPUT);
   
-  // Initialize garden data
   gardenData.temperature = 0;
   gardenData.humidity = 0;
   gardenData.soilMoisture = 0;
@@ -169,52 +169,45 @@ void initializeDevices() {
 }
 
 void loop() {
-  // ===== HANDLE SOCKET HUB COMMUNICATION =====
   if (Serial1.available()) {
     String socketMessage = Serial1.readStringUntil('\n');
     handleSocketHubMessage(socketMessage);
   }
   
-  // ===== HANDLE DOOR MASTER COMMUNICATION =====
   if (Serial2.available()) {
     String doorMessage = Serial2.readStringUntil('\n');
     handleDoorMasterMessage(doorMessage);
   }
   
-  // ===== HANDLE GARDEN MASTER COMMUNICATION =====
   if (Serial3.available()) {
     String gardenMessage = Serial3.readStringUntil('\n');
     handleGardenMasterMessage(gardenMessage);
   }
   
-  // ===== SENSOR READING =====
   static unsigned long lastSensorRead = 0;
-  if (millis() - lastSensorRead > 30000) {  // Every 30 seconds
+  if (millis() - lastSensorRead > 30000) {
     readGardenSensors();
     processGardenAutomation();
     sendGardenDataToESP();
     lastSensorRead = millis();
   }
   
-  // ===== PUMP SAFETY CHECK =====
   checkPumpSafety();
   
-  // ===== PERIODIC TASKS =====
   static unsigned long lastStatusCheck = 0;
-  if (millis() - lastStatusCheck > 30000) {  // Every 30 seconds
+  if (millis() - lastStatusCheck > 30000) {
     checkSystemHealth();
     lastStatusCheck = millis();
   }
   
   static unsigned long lastStatusPrint = 0;
-  if (millis() - lastStatusPrint > 120000) {  // Every 2 minutes
+  if (millis() - lastStatusPrint > 120000) {
     printSystemStatus();
     lastStatusPrint = millis();
   }
   
-  // ===== HEARTBEAT =====
   static unsigned long lastHeartbeat = 0;
-  if (millis() - lastHeartbeat > 60000) {  // Every minute
+  if (millis() - lastHeartbeat > 60000) {
     sendSystemHeartbeat();
     lastHeartbeat = millis();
   }
@@ -222,27 +215,21 @@ void loop() {
   delay(100);
 }
 
-// ===== SENSOR READING FUNCTIONS =====
 void readGardenSensors() {
   sensorReadings++;
   
-  // Read DHT11
   gardenData.temperature = dht.readTemperature();
   gardenData.humidity = dht.readHumidity();
   
-  // Read soil moisture (0-1023, convert to percentage)
   int soilRaw = analogRead(SOIL_MOISTURE_PIN);
-  gardenData.soilMoisture = map(soilRaw, 1023, 0, 0, 100);  // Invert: wet=high%
+  gardenData.soilMoisture = map(soilRaw, 1023, 0, 0, 100);
   
-  // Read light sensor (digital: HIGH=dark, LOW=bright)
   bool lightDigital = digitalRead(LIGHT_SENSOR_PIN);
-  gardenData.lightLevel = lightDigital ? 0 : 1000;  // 0=dark, 1000=bright (simplified)
+  gardenData.lightLevel = lightDigital ? 0 : 1000;
   
-  // Read water/rain sensor (digital-like reading)
   int waterRaw = analogRead(WATER_SENSOR_PIN);
-  gardenData.rainDetected = (waterRaw > 500);  // Threshold for rain detection
+  gardenData.rainDetected = (waterRaw > 500);
   
-  // Read current time from RTC
   DateTime now = rtc.now();
   gardenData.currentTime = String(now.hour()) + ":" + 
                           (now.minute() < 10 ? "0" : "") + String(now.minute()) + ":" +
@@ -251,29 +238,26 @@ void readGardenSensors() {
   gardenData.lastUpdated = millis();
   
   Serial.println("[SENSORS] Temp: " + String(gardenData.temperature) + "°C | " +
-                  "Humidity: " + String(gardenData.humidity) + "% | " +
-                  "Soil: " + String(gardenData.soilMoisture) + "% | " +
-                  "Light: " + String(gardenData.lightLevel) + " lux | " +
-                  "Rain: " + String(gardenData.rainDetected ? "YES" : "NO"));
+                "Humidity: " + String(gardenData.humidity) + "% | " +
+                "Soil: " + String(gardenData.soilMoisture) + "% | " +
+                "Light: " + String(gardenData.lightLevel) + " lux | " +
+                "Rain: " + String(gardenData.rainDetected ? "YES" : "NO"));
 }
 
 void processGardenAutomation() {
   if (!autoWateringEnabled) return;
   
-  // Stop pump if rain detected
   if (gardenData.rainDetected && gardenData.pumpRunning) {
     stopPump("Rain detected");
     return;
   }
   
-  // Start pump if soil is dry and no rain
   if (gardenData.soilMoisture < soilMoistureThreshold && 
       !gardenData.pumpRunning && 
       !gardenData.rainDetected) {
     startPump("Low soil moisture");
   }
   
-  // Stop pump if soil is sufficiently wet
   if (gardenData.soilMoisture > (soilMoistureThreshold + 20) && 
       gardenData.pumpRunning) {
     stopPump("Soil moisture sufficient");
@@ -286,8 +270,6 @@ void startPump(String reason) {
   pumpStartTime = millis();
   
   Serial.println("[PUMP] ✓ Started - " + reason);
-  
-  // Send pump status to garden ESP
   sendPumpStatusToESP();
 }
 
@@ -297,13 +279,10 @@ void stopPump(String reason) {
   pumpStartTime = 0;
   
   Serial.println("[PUMP] ✓ Stopped - " + reason);
-  
-  // Send pump status to garden ESP
   sendPumpStatusToESP();
 }
 
 void checkPumpSafety() {
-  // Safety: Stop pump after max run time
   if (gardenData.pumpRunning && pumpStartTime > 0 && 
       (millis() - pumpStartTime > maxPumpRunTime)) {
     stopPump("Safety timeout");
@@ -321,18 +300,15 @@ void sendGardenDataToESP() {
   data += gardenData.currentTime;
   
   Serial3.println(data);
-  
   Serial.println("[MEGA→GARDEN] " + data);
 }
 
 void sendPumpStatusToESP() {
   String status = "PUMP_STATUS:";
   status += String(gardenData.pumpRunning ? 1 : 0);
-  
   Serial3.println(status);
 }
 
-// ===== SOCKET HUB MESSAGE HANDLING =====
 void handleSocketHubMessage(String message) {
   message.trim();
   if (message.length() == 0) return;
@@ -343,7 +319,6 @@ void handleSocketHubMessage(String message) {
   Serial.println("[SOCKET→MEGA] " + message);
   
   if (message.startsWith("CMD:")) {
-    // Check if it's a garden command or door command
     if (message.indexOf("GARDEN") >= 0) {
       handleGardenSocketCommand(message);
     } else {
@@ -353,8 +328,7 @@ void handleSocketHubMessage(String message) {
 }
 
 void handleGardenSocketCommand(String cmdMessage) {
-  // Examples: CMD:GARDEN:PUMP_ON, CMD:GARDEN:PUMP_OFF, CMD:GARDEN:AUTO_TOGGLE
-  String cmdData = cmdMessage.substring(4);  // Remove "CMD:"
+  String cmdData = cmdMessage.substring(4);
   
   if (cmdData == "GARDEN:PUMP_ON") {
     startPump("Manual command");
@@ -365,15 +339,12 @@ void handleGardenSocketCommand(String cmdMessage) {
     Serial.println("[GARDEN] Auto watering: " + String(autoWateringEnabled ? "ON" : "OFF"));
   }
   
-  // Send response back to socket
   String response = "RESP:{\"success\":true,\"command\":\"" + cmdData + "\",\"type\":\"garden\"}";
   Serial1.println(response);
 }
 
 void handleDoorSocketCommand(String cmdMessage) {
-  // Parse: CMD:serialNumber:action (for doors)
   String cmdData = cmdMessage.substring(4);
-  
   int colonIndex = cmdData.indexOf(':');
   if (colonIndex <= 0) {
     Serial.println("[CMD] ✗ Invalid door format: " + cmdMessage);
@@ -383,6 +354,18 @@ void handleDoorSocketCommand(String cmdMessage) {
   String serialNumber = cmdData.substring(0, colonIndex);
   String action = cmdData.substring(colonIndex + 1);
   
+  // Kiểm tra độ dài dữ liệu để tránh cắt ngắn
+  if (serialNumber.length() >= 32) {
+    Serial.println("[CMD] ✗ Serial number too long: " + serialNumber);
+    sendErrorResponse(serialNumber, action, "Serial number too long");
+    return;
+  }
+  if (action.length() >= 16) {
+    Serial.println("[CMD] ✗ Action too long: " + action);
+    sendErrorResponse(serialNumber, action, "Action too long");
+    return;
+  }
+  
   int deviceIndex = findDeviceBySerial(serialNumber);
   if (deviceIndex < 0) {
     Serial.println("[CMD] ✗ Door not found: " + serialNumber);
@@ -390,11 +373,10 @@ void handleDoorSocketCommand(String cmdMessage) {
     return;
   }
   
-  // Update device state
   devices[deviceIndex].lastAction = action;
   devices[deviceIndex].lastSeen = millis();
   
-  // Forward to Door Master
+  // Định dạng lệnh theo cấu trúc ESPNowMessage
   String forwardCmd = "CMD:" + serialNumber + ":" + action;
   Serial2.println(forwardCmd);
   
@@ -404,7 +386,6 @@ void handleDoorSocketCommand(String cmdMessage) {
   Serial.println("[MEGA→DOOR_MASTER] " + forwardCmd);
 }
 
-// ===== DOOR MASTER MESSAGE HANDLING =====
 void handleDoorMasterMessage(String message) {
   message.trim();
   if (message.length() == 0) return;
@@ -420,17 +401,14 @@ void handleDoorMasterMessage(String message) {
 }
 
 void handleDoorMasterResponse(String respMessage) {
-  // Extract JSON from RESP:
   String jsonData = respMessage.substring(5);
   
-  // Parse basic fields for device state update
   String deviceId = extractJsonField(jsonData, "deviceId");
   String command = extractJsonField(jsonData, "command");
   String success = extractJsonField(jsonData, "success");
   String result = extractJsonField(jsonData, "result");
   String servoAngle = extractJsonField(jsonData, "servo_angle");
   
-  // Update device state
   int deviceIndex = findDeviceBySerial(deviceId);
   if (deviceIndex >= 0) {
     devices[deviceIndex].isOnline = true;
@@ -447,14 +425,12 @@ void handleDoorMasterResponse(String respMessage) {
     Serial.println("        Angle: " + servoAngle + "° | Door: " + String(devices[deviceIndex].doorOpen ? "OPEN" : "CLOSED"));
   }
   
-  // Forward response back to Socket Hub
   Serial1.println(respMessage);
   responsesForwarded++;
   
   Serial.println("[MEGA→SOCKET] " + respMessage);
 }
 
-// ===== GARDEN MASTER MESSAGE HANDLING =====
 void handleGardenMasterMessage(String message) {
   message.trim();
   if (message.length() == 0) return;
@@ -465,13 +441,11 @@ void handleGardenMasterMessage(String message) {
   Serial.println("[GARDEN_MASTER→MEGA] " + message);
   
   if (message.startsWith("RESP:")) {
-    // Forward garden responses to socket
     Serial1.println(message);
     Serial.println("[MEGA→SOCKET] " + message);
   }
 }
 
-// ===== UTILITY FUNCTIONS =====
 int findDeviceBySerial(String serialNumber) {
   for (int i = 0; i < TOTAL_DEVICES; i++) {
     if (devices[i].serialNumber == serialNumber) {
@@ -487,8 +461,6 @@ String extractJsonField(String json, String fieldName) {
   if (startIndex == -1) return "";
   
   startIndex += searchKey.length();
-  
-  // Skip whitespace and quotes
   while (startIndex < json.length() && (json.charAt(startIndex) == ' ' || json.charAt(startIndex) == '"')) {
     startIndex++;
   }
@@ -502,11 +474,19 @@ String extractJsonField(String json, String fieldName) {
 }
 
 void sendErrorResponse(String serialNumber, String action, String error) {
+  // Kiểm tra độ dài chuỗi
+  char serialBuf[32];
+  char actionBuf[16];
+  char errorBuf[32];
+  safeStringCopy(serialBuf, serialNumber.c_str(), sizeof(serialBuf));
+  safeStringCopy(actionBuf, action.c_str(), sizeof(actionBuf));
+  safeStringCopy(errorBuf, error.c_str(), sizeof(errorBuf));
+  
   String json = "{";
   json += "\"success\":false,";
-  json += "\"result\":\"" + error + "\",";
-  json += "\"deviceId\":\"" + serialNumber + "\",";
-  json += "\"command\":\"" + action + "\",";
+  json += "\"result\":\"" + String(errorBuf) + "\",";
+  json += "\"deviceId\":\"" + String(serialBuf) + "\",";
+  json += "\"command\":\"" + String(actionBuf) + "\",";
   json += "\"mega_processed\":true,";
   json += "\"timestamp\":" + String(millis());
   json += "}";
@@ -515,27 +495,23 @@ void sendErrorResponse(String serialNumber, String action, String error) {
 }
 
 void checkSystemHealth() {
-  // Check Socket Hub connection
   if (socketHubConnected && (millis() - lastSocketMessage > 120000)) {
     socketHubConnected = false;
     Serial.println("[HEALTH] ✗ Socket Hub timeout");
   }
   
-  // Check Door Master connection
   if (doorMasterConnected && (millis() - lastDoorMessage > 120000)) {
     doorMasterConnected = false;
     Serial.println("[HEALTH] ✗ Door Master timeout");
   }
   
-  // Check Garden Master connection
   if (gardenMasterConnected && (millis() - lastGardenMessage > 120000)) {
     gardenMasterConnected = false;
     Serial.println("[HEALTH] ✗ Garden Master timeout");
   }
   
-  // Check device timeouts
   for (int i = 0; i < TOTAL_DEVICES; i++) {
-    if (devices[i].isOnline && (millis() - devices[i].lastSeen > 300000)) {  // 5 minutes
+    if (devices[i].isOnline && (millis() - devices[i].lastSeen > 300000)) {
       devices[i].isOnline = false;
       devices[i].status = "timeout";
       Serial.println("[HEALTH] ✗ Door " + String(i + 1) + " timeout");
@@ -547,8 +523,8 @@ void sendSystemHeartbeat() {
   Serial.println("[HEARTBEAT] Mega Garden Hub alive - uptime: " + String((millis() - systemUptime) / 1000) + "s");
   Serial.println("           Sensors: " + String(sensorReadings) + " readings");
   Serial.println("           Garden: " + String(gardenData.temperature) + "°C, " + 
-                  String(gardenData.soilMoisture) + "% soil, pump " + 
-                  String(gardenData.pumpRunning ? "ON" : "OFF"));
+                String(gardenData.soilMoisture) + "% soil, pump " + 
+                String(gardenData.pumpRunning ? "ON" : "OFF"));
 }
 
 void printSystemStatus() {
@@ -579,10 +555,10 @@ void printSystemStatus() {
     if (devices[i].isOnline) onlineCount++;
     
     Serial.println("Door " + String(i + 1) + ": " + 
-                   String(devices[i].isOnline ? "ONLINE" : "OFFLINE") + 
-                   " | " + String(devices[i].doorOpen ? "OPEN" : "CLOSED") + 
-                   " | " + String(devices[i].servoAngle) + "° | " + 
-                   devices[i].status);
+                  String(devices[i].isOnline ? "ONLINE" : "OFFLINE") + 
+                  " | " + String(devices[i].doorOpen ? "OPEN" : "CLOSED") + 
+                  " | " + String(devices[i].servoAngle) + "° | " + 
+                  devices[i].status);
   }
   
   Serial.println("\nOnline Doors: " + String(onlineCount) + "/" + String(TOTAL_DEVICES));
@@ -590,7 +566,6 @@ void printSystemStatus() {
   Serial.println("=====================================\n");
 }
 
-// Simple free memory check for Arduino
 int freeMemory() {
   extern int __heap_start, *__brkval;
   int v;

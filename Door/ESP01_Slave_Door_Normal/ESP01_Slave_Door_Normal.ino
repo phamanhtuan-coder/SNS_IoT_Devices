@@ -27,7 +27,7 @@ struct ESPNowMessage {
   unsigned long timestamp;
 };
 
-// ✅ SAFE STRING COPY
+// SAFE STRING COPY
 void safeStringCopy(char* dest, const char* src, size_t destSize) {
   if (destSize > 0) {
     strncpy(dest, src, destSize - 1);
@@ -40,27 +40,22 @@ enum DoorState { DOOR_CLOSED = 0, OPENING = 1, OPEN = 2, DOOR_CLOSING = 3 };
 DoorState currentState = DOOR_CLOSED;
 bool isMoving = false;
 
-// ✅ CRITICAL: Prevent callback-to-callback sending
 volatile bool needToSendHeartbeat = false;
 volatile bool needToSendCommandResponse = false;
 volatile bool needToSendStatus = false;
 
-// Response data for main loop processing
 String pendingCommandAction = "";
 bool pendingCommandSuccess = false;
 String pendingCommandResult = "";
 
-// CONNECTION STATUS
 bool gatewayOnline = false;
 unsigned long lastGatewayMessage = 0;
 unsigned long lastHeartbeat = 0;
 unsigned long lastStatusSent = 0;
 
-// MEMORY PROTECTION - Smaller buffers for ESP-01
 static ESPNowMessage receiveBuffer;
 static ESPNowMessage sendBuffer;
 
-// COUNTERS
 unsigned long messagesSent = 0;
 unsigned long messagesReceived = 0;
 
@@ -73,19 +68,16 @@ void setup() {
   Serial.println("Serial: " + DEVICE_SERIAL);
   Serial.println("My MAC: " + WiFi.macAddress());
   
-  // Initialize servo
   pinMode(SERVO_PIN, OUTPUT);
   setServoAngle(0);
   currentAngle = 0;
   currentState = DOOR_CLOSED;
   Serial.println("[SERVO] ✓ Initialized at 0°");
   
-  // Setup ESP-NOW
   setupESPNowStable();
   
   Serial.println("[INIT] ✓ ESP-01 Ready");
   
-  // Initial heartbeat after delay
   delay(2000);
   needToSendHeartbeat = true;
   
@@ -134,39 +126,52 @@ void onDataSentStable(uint8_t *mac_addr, uint8_t sendStatus) {
   }
 }
 
-// ✅ CRITICAL FIX: Minimal processing in callback
 void onDataReceivedStable(uint8_t *mac_addr, uint8_t *incomingData, uint8_t len) {
   messagesReceived++;
   
-  // Quick validation
-  if (memcmp(mac_addr, gatewayMAC, 6) != 0 || len != sizeof(ESPNowMessage)) {
-    Serial.println("[ESP-NOW] RX #" + String(messagesReceived) + " ✗ Invalid");
+  if (memcmp(mac_addr, gatewayMAC, 6) != 0) {
+    Serial.println("[ESP-NOW] RX #" + String(messagesReceived) + " ✗ Invalid MAC");
     return;
   }
   
-  // Quick copy
+  if (len != sizeof(ESPNowMessage)) {
+    Serial.println("[ESP-NOW] RX #" + String(messagesReceived) + " ✗ Invalid size: " + String(len));
+    return;
+  }
+  
   memcpy(&receiveBuffer, incomingData, len);
   
-  // Update connection status
+  // Kiểm tra chuỗi null-terminated
+  if (receiveBuffer.messageType[sizeof(receiveBuffer.messageType) - 1] != '\0' ||
+      receiveBuffer.serialNumber[sizeof(receiveBuffer.serialNumber) - 1] != '\0' ||
+      receiveBuffer.action[sizeof(receiveBuffer.action) - 1] != '\0' ||
+      receiveBuffer.result[sizeof(receiveBuffer.result) - 1] != '\0') {
+    Serial.println("[ESP-NOW] RX #" + String(messagesReceived) + " ✗ Non-null-terminated string");
+    return;
+  }
+  
   gatewayOnline = true;
   lastGatewayMessage = millis();
   
   String msgType = String(receiveBuffer.messageType);
+  String serialNumber = String(receiveBuffer.serialNumber);
+  
+  // Kiểm tra serial number khớp với thiết bị
+  if (serialNumber != DEVICE_SERIAL) {
+    Serial.println("[ESP-NOW] RX #" + String(messagesReceived) + " ✗ Serial mismatch: " + serialNumber);
+    return;
+  }
+  
   Serial.println("[ESP-NOW] RX #" + String(messagesReceived) + ": " + msgType);
   
-  // ✅ CRITICAL: Set flags for main loop processing - NO SENDING HERE
   if (msgType == "command") {
     pendingCommandAction = String(receiveBuffer.action);
     needToSendCommandResponse = true;
-    
   } else if (msgType == "heartbeat") {
     needToSendHeartbeat = true;
   }
-  
-  // NO ESP-NOW SENDING FROM CALLBACK!
 }
 
-// ✅ SAFE: Main loop processing
 void processCommand() {
   if (!needToSendCommandResponse) return;
   needToSendCommandResponse = false;
@@ -180,17 +185,14 @@ void processCommand() {
   if (isMoving) {
     result = "busy";
     success = false;
-    
   } else if (action == "open_door" && currentState == DOOR_CLOSED) {
     openDoor();
     success = true;
     result = "opening";
-    
   } else if (action == "close_door" && currentState == OPEN) {
     closeDoor();
     success = true;
     result = "closing";
-    
   } else if (action == "toggle_door") {
     if (currentState == DOOR_CLOSED) {
       openDoor();
@@ -202,18 +204,15 @@ void processCommand() {
       result = "moving";
     }
     success = true;
-    
   } else {
     result = "invalid";
     success = false;
   }
   
-  // Store for sending
   pendingCommandAction = action;
   pendingCommandSuccess = success;
   pendingCommandResult = result;
   
-  // Send response
   sendCommandResponse();
 }
 
@@ -276,7 +275,6 @@ void setServoAngle(int angle) {
   delayMicroseconds(20000 - pulseWidth);
 }
 
-// ✅ SAFE: Send functions called from main loop only
 void sendCommandResponse() {
   memset(&sendBuffer, 0, sizeof(sendBuffer));
   
@@ -289,7 +287,7 @@ void sendCommandResponse() {
   sendBuffer.success = pendingCommandSuccess;
   sendBuffer.timestamp = millis();
   
-  int result = esp_now_send(gatewayMAC, (uint8_t*)&sendBuffer, sizeof(sendBuffer));
+  int result = esp_now_send(gatewayMAC, (uint8_t*)&sendBuffer, sizeof(ESPNowMessage));
   Serial.println("[RESP] " + pendingCommandAction + " = " + String(pendingCommandSuccess) + " (" + String(result) + ")");
 }
 
@@ -307,7 +305,7 @@ void sendHeartbeat() {
   sendBuffer.success = true;
   sendBuffer.timestamp = millis();
   
-  int result = esp_now_send(gatewayMAC, (uint8_t*)&sendBuffer, sizeof(sendBuffer));
+  int result = esp_now_send(gatewayMAC, (uint8_t*)&sendBuffer, sizeof(ESPNowMessage));
   
   if (result == 0) {
     Serial.println("[HEARTBEAT] ✓ Sent");
@@ -337,7 +335,7 @@ void sendStatusUpdate() {
   sendBuffer.success = true;
   sendBuffer.timestamp = millis();
   
-  int result = esp_now_send(gatewayMAC, (uint8_t*)&sendBuffer, sizeof(sendBuffer));
+  int result = esp_now_send(gatewayMAC, (uint8_t*)&sendBuffer, sizeof(ESPNowMessage));
   Serial.println("[STATUS] " + state + " (" + String(result) + ")");
   
   lastStatusSent = millis();
@@ -365,36 +363,30 @@ void printStatus() {
 }
 
 void loop() {
-  // ✅ CRITICAL: Process all sending in main loop only
   processCommand();
   sendHeartbeat();
   sendStatusUpdate();
   
-  // Heartbeat timer
   if (millis() - lastHeartbeat > 45000) {
     needToSendHeartbeat = true;
   }
   
-  // Status timer
   if (millis() - lastStatusSent > 180000) {
     needToSendStatus = true;
   }
   
-  // Connection check
   static unsigned long lastCheck = 0;
   if (millis() - lastCheck > 15000) {
     checkConnection();
     lastCheck = millis();
   }
   
-  // Status print
   static unsigned long lastPrint = 0;
   if (millis() - lastPrint > 60000) {
     printStatus();
     lastPrint = millis();
   }
   
-  // Keep servo stable
   if (!isMoving) {
     setServoAngle(currentAngle);
   }
