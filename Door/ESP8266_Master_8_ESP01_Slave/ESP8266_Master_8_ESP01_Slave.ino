@@ -1,111 +1,107 @@
-#define FIRMWARE_VERSION "3.0.4"
-#define GATEWAY_ID "ESP_GATEWAY_001"
+#define FIRMWARE_VERSION "4.0.0"
+#define GATEWAY_ID "ESP_GATEWAY_002"
 
 #include <ESP8266WiFi.h>
 #include <espnow.h>
 #include <ArduinoJson.h>
 
+// ✅ OPTIMIZED: Compact message structure matching ESP-01
+struct CompactMessage {
+  char type[4];        // "CMD", "ACK", "HBT", "STS"
+  char action[4];      // "OPN", "CLS", "TGL", "ALV", etc.
+  int angle;           // Servo angle
+  bool success;        // Success flag
+  unsigned long ts;    // Timestamp
+};
+
+// ✅ OPTIMIZED: Simplified door configuration
 struct DoorConfig {
   String serialNumber;
   uint8_t macAddress[6];
-  int connectionId;
+  int doorId;
   bool isOnline;
   unsigned long lastSeen;
-  unsigned long lastHeartbeatSent;
+  int currentAngle;
+  String doorState;
 };
 
 DoorConfig doors[7] = {
-  {"SERL27JUN2501JYR2RKVVX08V40YMGTW", {0x84, 0x0D, 0x8E, 0xA4, 0x91, 0x58}, 0, false, 0, 0},
-  {"SERL27JUN2501JYR2RKVR0SC7SJ8P8DD", {0x84, 0x0D, 0x8E, 0xA4, 0x3b, 0xe0}, 1, false, 0, 0},
-  {"SERL27JUN2501JYR2RKVRNHS46VR6AS1", {0x3c, 0x71, 0xbf, 0x39, 0x31, 0x2a}, 2, false, 0, 0},
-  {"SERL27JUN2501JYR2RKVSE2RW7KQ4KMP", {0x84, 0x0d, 0x8e, 0xa4, 0x91, 0x9c}, 3, false, 0, 0},
-  {"SERL27JUN2501JYR2RKVTBZ40JPF88WP", {0x84, 0x0d, 0x8e, 0xa4, 0x91, 0xa4}, 4, false, 0, 0},
-  {"SERL27JUN2501JYR2RKVTXNCK1GB3HBZ", {0x84, 0x0d, 0x8e, 0xa4, 0x3a, 0xd2}, 5, false, 0, 0}, 
-  {"SERL27JUN2501JYR2RKVS2P6XBVF1P2E", {0x84, 0x0d, 0x8e, 0xa4, 0x3b, 0x29}, 6, false, 0, 0},  
+  {"SERL27JUN2501JYR2RKVVX08V40YMGTW", {0x84, 0x0D, 0x8E, 0xA4, 0x91, 0x58}, 1, false, 0, 0, "CLD"},
+  {"SERL27JUN2501JYR2RKVR0SC7SJ8P8DD", {0x84, 0x0D, 0x8E, 0xA4, 0x3b, 0xe0}, 2, false, 0, 0, "CLD"},
+  {"SERL27JUN2501JYR2RKVRNHS46VR6AS1", {0x3c, 0x71, 0xbf, 0x39, 0x31, 0x2a}, 3, false, 0, 0, "CLD"},
+  {"SERL27JUN2501JYR2RKVSE2RW7KQ4KMP", {0x84, 0x0d, 0x8e, 0xa4, 0x91, 0x9c}, 4, false, 0, 0, "CLD"},
+  {"SERL27JUN2501JYR2RKVTBZ40JPF88WP", {0x84, 0x0d, 0x8e, 0xa4, 0x91, 0xa4}, 5, false, 0, 0, "CLD"},
+  {"SERL27JUN2501JYR2RKVTXNCK1GB3HBZ", {0x84, 0x0d, 0x8e, 0xa4, 0x3a, 0xd2}, 6, false, 0, 0, "CLD"},
+  {"SERL27JUN2501JYR2RKVS2P6XBVF1P2E", {0x84, 0x0d, 0x8e, 0xa4, 0x3b, 0x29}, 7, false, 0, 0, "CLD"}
 };
 const int TOTAL_DOORS = 7;
 
-struct ESPNowMessage {
-  char messageType[16];
-  char serialNumber[32];
-  char action[16];
-  int servoAngle;
-  bool success;
-  char result[32];
-  unsigned long timestamp;
-};
+static CompactMessage sendBuffer;
+static CompactMessage receiveBuffer;
 
-static ESPNowMessage sendBuffer;
-static ESPNowMessage receiveBuffer;
+// ✅ OPTIMIZED: Action mapping for compact commands
+String mapActionToCompact(String action) {
+  if (action == "open_door") return "OPN";
+  if (action == "close_door") return "CLS";
+  if (action == "toggle_door") return "TGL";
+  return "UNK";  // Unknown
+}
 
-void safeStringCopy(char* dest, const char* src, size_t destSize) {
-  if (destSize > 0) {
-    strncpy(dest, src, destSize - 1);
-    dest[destSize - 1] = '\0';
-  }
+String mapCompactToFull(String compact) {
+  if (compact == "OPN") return "open_door";
+  if (compact == "CLS") return "close_door"; 
+  if (compact == "TGL") return "toggle_door";
+  if (compact == "ALV") return "alive";
+  return compact;
+}
+
+String mapStateToFull(String compact) {
+  if (compact == "CLD") return "closed";
+  if (compact == "OPG") return "opening";
+  if (compact == "OPD") return "open";
+  if (compact == "CLG") return "closing";
+  return "unknown";
 }
 
 void setup() {
   Serial.begin(115200);
-  delay(2000);
+  delay(1500);
   
-  Serial.println("\n=== ESP Gateway Master v3.0.4 ===");
-  Serial.println("Managing " + String(TOTAL_DOORS) + " ESP-01 Door Controllers");
-  Serial.println("Gateway ID: " + String(GATEWAY_ID));
-  Serial.println("Gateway MAC: " + WiFi.macAddress());
+  Serial.println("ESP Gateway v4.0.0");
+  Serial.println("ID:" + String(GATEWAY_ID));
+  Serial.println("Doors:" + String(TOTAL_DOORS));
+  Serial.println("MAC:" + WiFi.macAddress());
   
   setupESPNow();
   
-  Serial.println("[INIT] Gateway Ready");
-  printDoorConfiguration();
+  Serial.println("Gateway Ready");
 }
 
 void setupESPNow() {
-  Serial.println("[ESP-NOW] Initializing...");
-  
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
   wifi_set_channel(1);
   wifi_set_sleep_type(NONE_SLEEP_T);
-  Serial.println("[ESP-NOW] Channel: 1, Sleep: NONE");
   
-  int initResult = esp_now_init();
-  if (initResult != 0) {
-    Serial.println("[ESP-NOW] Init FAILED: " + String(initResult));
-    delay(5000);
+  if (esp_now_init() != 0) {
+    Serial.println("ESP-NOW Init FAIL");
+    delay(3000);
     ESP.restart();
   }
-  
-  Serial.println("[ESP-NOW] Init OK");
   
   esp_now_set_self_role(ESP_NOW_ROLE_COMBO);
   esp_now_register_send_cb(onDataSent);
   esp_now_register_recv_cb(onDataReceived);
   
-  Serial.println("[ESP-NOW] Adding " + String(TOTAL_DOORS) + " ESP-01 peers...");
-  
+  // Add all ESP-01 peers
   for (int i = 0; i < TOTAL_DOORS; i++) {
-    Serial.print("[ESP-NOW] Door " + String(i + 1) + " MAC: ");
-    for (int j = 0; j < 6; j++) {
-      Serial.printf("%02X", doors[i].macAddress[j]);
-      if (j < 5) Serial.print(":");
-    }
-    Serial.println();
-    
     int result = esp_now_add_peer(doors[i].macAddress, ESP_NOW_ROLE_COMBO, 1, NULL, 0);
-    if (result != 0) {
-      Serial.println("[ESP-NOW] ✗ Door " + String(i + 1) + " peer add failed: " + String(result));
-      delay(100);
-      result = esp_now_add_peer(doors[i].macAddress, ESP_NOW_ROLE_COMBO, 0, NULL, 0);
-      if (result == 0) {
-        Serial.println("[ESP-NOW] ✓ Door " + String(i + 1) + " peer added (retry)");
-      }
+    if (result == 0) {
+      Serial.println("Door" + String(i + 1) + " Peer OK");
     } else {
-      Serial.println("[ESP-NOW] ✓ Door " + String(i + 1) + " peer added");
+      Serial.println("Door" + String(i + 1) + " Peer FAIL:" + String(result));
     }
   }
-  
-  Serial.println("[ESP-NOW] Setup complete - " + String(TOTAL_DOORS) + " doors configured");
 }
 
 int findDoorByMAC(uint8_t *mac_addr) {
@@ -128,131 +124,116 @@ int findDoorBySerial(String serialNumber) {
 
 void onDataSent(uint8_t *mac_addr, uint8_t sendStatus) {
   int doorIndex = findDoorByMAC(mac_addr);
-  String doorInfo = (doorIndex >= 0) ? "Door " + String(doorIndex + 1) : "Unknown";
-  
   if (sendStatus == 0) {
-    Serial.println("[ESP-NOW] ✓ Send OK to " + doorInfo);
+    Serial.println("TX OK Door" + String(doorIndex + 1));
   } else {
-    Serial.println("[ESP-NOW] ✗ Send FAILED to " + doorInfo + ": " + String(sendStatus));
+    Serial.println("TX FAIL Door" + String(doorIndex + 1) + ":" + String(sendStatus));
   }
 }
 
-void onDataReceived(uint8_t *mac_addr, uint8_t *incomingData, uint8_t len) {
+void onDataReceived(uint8_t *mac_addr, uint8_t *data, uint8_t len) {
   int doorIndex = findDoorByMAC(mac_addr);
   
-  if (doorIndex < 0) {
-    Serial.println("[ESP-NOW] Unknown sender");
+  if (doorIndex < 0 || len != sizeof(CompactMessage)) {
+    Serial.println("RX Invalid");
     return;
   }
   
-  if (len != sizeof(ESPNowMessage)) {
-    Serial.println("[ESP-NOW] Invalid size from Door " + String(doorIndex + 1) + ": " + String(len));
-    return;
-  }
-  
-  memset(&receiveBuffer, 0, sizeof(receiveBuffer));
-  memcpy(&receiveBuffer, incomingData, len);
+  memcpy(&receiveBuffer, data, len);
   
   doors[doorIndex].lastSeen = millis();
   doors[doorIndex].isOnline = true;
+  doors[doorIndex].currentAngle = receiveBuffer.angle;
   
-  String msgType = String(receiveBuffer.messageType);
-  String doorSerial = String(receiveBuffer.serialNumber);
+  String msgType = String(receiveBuffer.type);
+  String action = String(receiveBuffer.action);
   
-  Serial.println("[ESP-NOW] RX from Door " + String(doorIndex + 1) + " (" + doorSerial + "): " + msgType);
+  Serial.println("RX Door" + String(doorIndex + 1) + ":" + msgType + ":" + action);
   
-  if (msgType == "heartbeat") {
-    Serial.println("[HEARTBEAT] Door " + String(doorIndex + 1) + " alive (angle: " + String(receiveBuffer.servoAngle) + "°)");
+  if (msgType == "HBT") {
+    Serial.println("HBT Door" + String(doorIndex + 1) + " Angle:" + String(receiveBuffer.angle));
     
-  } else if (msgType == "cmd_resp") {
-    String action = String(receiveBuffer.action);
-    bool success = receiveBuffer.success;
-    String result = String(receiveBuffer.result);
+  } else if (msgType == "ACK") {
+    String fullAction = mapCompactToFull(action);
+    sendCompactResponse(doors[doorIndex].serialNumber, fullAction, receiveBuffer.success, action);
     
-    Serial.println("[RECV] Door " + String(doorIndex + 1) + " response: " + action + " = " + String(success));
-    sendCommandResponse(doorSerial, action, success, result);
-    
-  } else if (msgType == "status") {
-    String json = "{";
-    json += "\"deviceId\":\"" + doorSerial + "\",";
-    json += "\"type\":\"deviceStatus\",";
-    json += "\"servo_angle\":" + String(receiveBuffer.servoAngle) + ",";
-    json += "\"door_state\":\"" + String(receiveBuffer.result) + "\",";
-    json += "\"esp01_online\":true,";
-    json += "\"connection_type\":\"gateway\",";
-    json += "\"door_index\":" + String(doorIndex + 1) + ",";
-    json += "\"timestamp\":" + String(receiveBuffer.timestamp);
-    json += "}";
-    
-    Serial.println("RESP:" + json);
+  } else if (msgType == "STS") {
+    doors[doorIndex].doorState = action;
+    String fullState = mapStateToFull(action);
+    sendCompactStatus(doors[doorIndex].serialNumber, fullState, receiveBuffer.angle);
   }
 }
 
+// ✅ OPTIMIZED: Send compact command to ESP-01
 void forwardCommandToESP01(String serialNumber, String action) {
   int doorIndex = findDoorBySerial(serialNumber);
   
   if (doorIndex < 0) {
-    Serial.println("[WARN] Door not found: " + serialNumber);
-    sendCommandResponse(serialNumber, action, false, "Door not found");
+    Serial.println("Door Not Found:" + serialNumber);
+    sendErrorResponse(serialNumber, action);
     return;
   }
   
   if (!doors[doorIndex].isOnline) {
-    Serial.println("[WARN] Door " + String(doorIndex + 1) + " offline, cannot send command");
-    sendCommandResponse(serialNumber, action, false, "ESP-01 offline");
+    Serial.println("Door" + String(doorIndex + 1) + " Offline");
+    sendErrorResponse(serialNumber, action);
     return;
   }
   
-  // Kiểm tra độ dài dữ liệu để tránh cắt ngắn
-  if (serialNumber.length() >= 32) {
-    Serial.println("[WARN] Serial number too long: " + serialNumber);
-    sendCommandResponse(serialNumber, action, false, "Serial number too long");
-    return;
-  }
-  if (action.length() >= 16) {
-    Serial.println("[WARN] Action too long: " + action);
-    sendCommandResponse(serialNumber, action, false, "Action too long");
-    return;
-  }
+  String compactAction = mapActionToCompact(action);
   
   memset(&sendBuffer, 0, sizeof(sendBuffer));
-  
-  safeStringCopy(sendBuffer.messageType, "command", sizeof(sendBuffer.messageType));
-  safeStringCopy(sendBuffer.serialNumber, serialNumber.c_str(), sizeof(sendBuffer.serialNumber));
-  safeStringCopy(sendBuffer.action, action.c_str(), sizeof(sendBuffer.action));
-  
-  sendBuffer.servoAngle = (action == "open_door") ? 180 : 0;
+  strncpy(sendBuffer.type, "CMD", 3);
+  strncpy(sendBuffer.action, compactAction.c_str(), 3);
+  sendBuffer.angle = 0;
   sendBuffer.success = false;
-  safeStringCopy(sendBuffer.result, "", sizeof(sendBuffer.result));
-  sendBuffer.timestamp = millis();
+  sendBuffer.ts = millis();
   
-  int result = esp_now_send(doors[doorIndex].macAddress, (uint8_t*)&sendBuffer, sizeof(ESPNowMessage));
+  delay(5);
+  int result = esp_now_send(doors[doorIndex].macAddress, (uint8_t*)&sendBuffer, sizeof(sendBuffer));
   
   if (result == 0) {
-    Serial.println("[ESP-NOW] ✓ Command sent to Door " + String(doorIndex + 1) + ": " + action);
+    Serial.println("CMD Sent Door" + String(doorIndex + 1) + ":" + compactAction);
   } else {
-    Serial.println("[ESP-NOW] ✗ Command failed to Door " + String(doorIndex + 1) + ": " + String(result));
-    sendCommandResponse(serialNumber, action, false, "ESP-NOW failed");
+    Serial.println("CMD FAIL Door" + String(doorIndex + 1) + ":" + String(result));
+    sendErrorResponse(serialNumber, action);
   }
 }
 
-void sendCommandResponse(String serialNumber, String command, bool success, String result) {
-  // Kiểm tra độ dài chuỗi
-  char serialBuf[32];
-  char commandBuf[16];
-  char resultBuf[32];
-  safeStringCopy(serialBuf, serialNumber.c_str(), sizeof(serialBuf));
-  safeStringCopy(commandBuf, command.c_str(), sizeof(commandBuf));
-  safeStringCopy(resultBuf, result.c_str(), sizeof(resultBuf));
-  
+// ✅ OPTIMIZED: Compact response format for MEGA
+void sendCompactResponse(String serialNumber, String command, bool success, String compactResult) {
+  // Create minimal JSON for MEGA
   String json = "{";
-  json += "\"success\":" + String(success ? "true" : "false") + ",";
-  json += "\"result\":\"" + String(resultBuf) + "\",";
-  json += "\"deviceId\":\"" + String(serialBuf) + "\",";
-  json += "\"command\":\"" + String(commandBuf) + "\",";
-  json += "\"gateway_processed\":true,";
-  json += "\"servo_angle\":0,";
-  json += "\"timestamp\":" + String(millis());
+  json += "\"s\":" + String(success ? "1" : "0") + ",";  // success -> s
+  json += "\"r\":\"" + compactResult + "\",";             // result -> r
+  json += "\"d\":\"" + serialNumber + "\",";             // deviceId -> d
+  json += "\"c\":\"" + command + "\",";                  // command -> c
+  json += "\"a\":" + String(receiveBuffer.angle) + ","; // angle -> a
+  json += "\"t\":" + String(millis());                  // timestamp -> t
+  json += "}";
+  
+  Serial.println("RESP:" + json);
+}
+
+void sendCompactStatus(String serialNumber, String state, int angle) {
+  String json = "{";
+  json += "\"d\":\"" + serialNumber + "\",";
+  json += "\"s\":\"" + state + "\",";
+  json += "\"a\":" + String(angle) + ",";
+  json += "\"o\":1,";  // online
+  json += "\"t\":" + String(millis());
+  json += "}";
+  
+  Serial.println("STS:" + json);
+}
+
+void sendErrorResponse(String serialNumber, String action) {
+  String json = "{";
+  json += "\"s\":0,";
+  json += "\"r\":\"ERROR\",";
+  json += "\"d\":\"" + serialNumber + "\",";
+  json += "\"c\":\"" + action + "\",";
+  json += "\"t\":" + String(millis());
   json += "}";
   
   Serial.println("RESP:" + json);
@@ -262,107 +243,75 @@ void sendHeartbeatToESP01(int doorIndex) {
   if (doorIndex < 0 || doorIndex >= TOTAL_DOORS) return;
   
   memset(&sendBuffer, 0, sizeof(sendBuffer));
-  
-  safeStringCopy(sendBuffer.messageType, "heartbeat", sizeof(sendBuffer.messageType));
-  safeStringCopy(sendBuffer.serialNumber, doors[doorIndex].serialNumber.c_str(), sizeof(sendBuffer.serialNumber));
-  safeStringCopy(sendBuffer.result, "gateway_ping", sizeof(sendBuffer.result));
-  
-  sendBuffer.servoAngle = 0;
+  strncpy(sendBuffer.type, "HBT", 3);
+  strncpy(sendBuffer.action, "PNG", 3);  // "PING" shortened
   sendBuffer.success = true;
-  sendBuffer.timestamp = millis();
+  sendBuffer.ts = millis();
   
-  int result = esp_now_send(doors[doorIndex].macAddress, (uint8_t*)&sendBuffer, sizeof(ESPNowMessage));
-  if (result == 0) {
-    Serial.println("[HEARTBEAT] ✓ Sent to Door " + String(doorIndex + 1));
-    doors[doorIndex].lastHeartbeatSent = millis();
-  } else {
-    Serial.println("[HEARTBEAT] ✗ Failed to Door " + String(doorIndex + 1) + ": " + String(result));
-  }
+  delay(10);
+  int result = esp_now_send(doors[doorIndex].macAddress, (uint8_t*)&sendBuffer, sizeof(sendBuffer));
+  Serial.println("HBT Door" + String(doorIndex + 1) + ":" + String(result == 0 ? "OK" : "FAIL"));
 }
 
 void checkESP01Status() {
   unsigned long now = millis();
   
   for (int i = 0; i < TOTAL_DOORS; i++) {
-    if (doors[i].isOnline && (now - doors[i].lastSeen > 180000)) {
+    if (doors[i].isOnline && (now - doors[i].lastSeen > 90000)) {  // 90 seconds timeout
       doors[i].isOnline = false;
-      Serial.println("[TIMEOUT] Door " + String(i + 1) + " (" + doors[i].serialNumber + ") offline");
+      Serial.println("Door" + String(i + 1) + " Timeout");
     }
   }
-}
-
-void printDoorConfiguration() {
-  Serial.println("\n[CONFIG] Door Configuration:");
-  for (int i = 0; i < TOTAL_DOORS; i++) {
-    Serial.println("Door" + String(i + 1) + ": " + doors[i].serialNumber);
-    Serial.print("MAC: ");
-    for (int j = 0; j < 6; j++) {
-      Serial.printf("%02X", doors[i].macAddress[j]);
-      if (j < 5) Serial.print(":");
-    }
-    Serial.println(" | Online: " + String(doors[i].isOnline ? "Yes" : "No"));
-  }
-  Serial.println();
-}
-
-void printStatus() {
-  Serial.println("\n[STATUS] Gateway Status:");
-  int onlineCount = 0;
-  for (int i = 0; i < TOTAL_DOORS; i++) {
-    if (doors[i].isOnline) onlineCount++;
-  }
-  Serial.println("ESP-01 Online: " + String(onlineCount) + "/" + String(TOTAL_DOORS));
-  Serial.println("Free Heap: " + String(ESP.getFreeHeap()) + " bytes");
-  Serial.println("Uptime: " + String(millis() / 1000) + "s");
-  Serial.println();
 }
 
 void loop() {
+  // ✅ OPTIMIZED: Handle MEGA commands with compact parsing
   if (Serial.available()) {
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
     
     if (cmd.startsWith("CMD:")) {
       String cmdData = cmd.substring(4);
+      
       int colonIndex = cmdData.indexOf(':');
       if (colonIndex > 0) {
         String serialNumber = cmdData.substring(0, colonIndex);
         String action = cmdData.substring(colonIndex + 1);
-        Serial.println("[COMMAND] Received: " + serialNumber + " -> " + action);
+        
+        Serial.println("RX CMD:" + serialNumber + "->" + action);
         forwardCommandToESP01(serialNumber, action);
-      } else {
-        String action = cmdData;
-        Serial.println("[COMMAND] Legacy format, using Door 1: " + action);
-        forwardCommandToESP01(doors[0].serialNumber, action);
       }
     }
   }
   
+  // ✅ OPTIMIZED: Faster heartbeat cycle
   static unsigned long lastHeartbeat = 0;
-  static int heartbeatDoorIndex = 0;
+  static int heartbeatIndex = 0;
   
-  if (millis() - lastHeartbeat > 10000) {
-    if (doors[heartbeatDoorIndex].isOnline || 
-        (millis() - doors[heartbeatDoorIndex].lastHeartbeatSent > 120000)) {
-      sendHeartbeatToESP01(heartbeatDoorIndex);
-    }
-    
-    heartbeatDoorIndex = (heartbeatDoorIndex + 1) % TOTAL_DOORS;
+  if (millis() - lastHeartbeat > 8000) {  // Every 8 seconds
+    sendHeartbeatToESP01(heartbeatIndex);
+    heartbeatIndex = (heartbeatIndex + 1) % TOTAL_DOORS;
     lastHeartbeat = millis();
   }
   
-  static unsigned long lastESP01Check = 0;
-  if (millis() - lastESP01Check > 30000) {
+  static unsigned long lastStatusCheck = 0;
+  if (millis() - lastStatusCheck > 20000) {
     checkESP01Status();
-    lastESP01Check = millis();
+    lastStatusCheck = millis();
   }
   
-  static unsigned long lastStatusUpdate = 0;
-  if (millis() - lastStatusUpdate > 120000) {
-    printStatus();
-    lastStatusUpdate = millis();
+  // Status print
+  static unsigned long lastStatus = 0;
+  if (millis() - lastStatus > 60000) {
+    int onlineCount = 0;
+    for (int i = 0; i < TOTAL_DOORS; i++) {
+      if (doors[i].isOnline) onlineCount++;
+    }
+    Serial.println("STATUS Online:" + String(onlineCount) + "/" + String(TOTAL_DOORS) + 
+                   " Heap:" + String(ESP.getFreeHeap()));
+    lastStatus = millis();
   }
   
   yield();
-  delay(10);
+  delay(5);
 }
