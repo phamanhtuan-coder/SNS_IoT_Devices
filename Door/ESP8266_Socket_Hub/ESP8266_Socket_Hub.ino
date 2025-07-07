@@ -7,17 +7,16 @@ const char* WIFI_PASSWORD = "21032001";
 String WEBSOCKET_HOST = "iothomeconnectapiv2-production.up.railway.app";
 uint16_t WEBSOCKET_PORT = 443;
 
-// ✅ HUB IDENTITY - Optimized Hub
-String HUB_SERIAL = "SERL29JUN2501JYXECBR32V8BD77RW82"; // Hub Socket Mô Hình 
+// HUB IDENTITY
+String HUB_SERIAL = "SERL29JUN2501JYXECBR32V8BD77RW82";
 #define FIRMWARE_VERSION "4.0.0"
 #define HUB_ID "ESP_HUB_OPT_001"
 
 WebSocketsClient webSocket;
 bool socketConnected = false;
 unsigned long lastPingResponse = 0;
-bool welcomeReceived = false;
 
-// ✅ OPTIMIZED: Compact command tracking
+// Compact command tracking
 struct CompactCommand {
   String action;
   String targetSerial;
@@ -26,6 +25,9 @@ struct CompactCommand {
 };
 
 CompactCommand lastCommand;
+
+// Prototype declaration
+String expandCompactResponse(String compactJson);
 
 void setup() {
   Serial.begin(115200);
@@ -64,10 +66,29 @@ void setupWiFi() {
   }
 }
 
+void checkConnectionStatus() {
+  if (!socketConnected) {
+    Serial.println("[STATUS] Socket not connected, attempting reconnection...");
+    
+    // Force reconnect if disconnected for too long
+    static unsigned long lastReconnectAttempt = 0;
+    if (millis() - lastReconnectAttempt > 10000) {
+      Serial.println("[RECONNECT] Manual reconnection attempt");
+      webSocket.disconnect();
+      delay(1000);
+      setupWebSocket();
+      lastReconnectAttempt = millis();
+    }
+  }
+}
+
 void setupWebSocket() {
-  // ✅ OPTIMIZED: Connect as optimized hub
   String path = "/socket.io/?EIO=3&transport=websocket&serialNumber=" + 
                 HUB_SERIAL + "&isIoTDevice=true&hub_managed=true&optimized=true";
+  
+  // Add connection retry logic
+  Serial.println("[WS] Setting up WebSocket connection...");
+  
   webSocket.beginSSL(WEBSOCKET_HOST.c_str(), WEBSOCKET_PORT, path.c_str());
   webSocket.onEvent(webSocketEvent);
   webSocket.setReconnectInterval(2000);
@@ -79,14 +100,17 @@ void setupWebSocket() {
   
   Serial.println("[SETUP] WebSocket path: " + path);
   Serial.println("[SETUP] User-Agent: " + userAgent);
+  
+  // Wait for initial connection attempt
+  delay(1000);
 }
+
 
 void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
   switch(type) {
     case WStype_DISCONNECTED:
       Serial.println("[WS] DISCONNECTED");
       socketConnected = false;
-      welcomeReceived = false;
       break;
       
     case WStype_CONNECTED:
@@ -106,6 +130,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
       
     case WStype_PONG:
       lastPingResponse = millis();
+      Serial.println("[WS] PONG received");
       break;
   }
 }
@@ -124,9 +149,11 @@ void handleWebSocketMessage(String message) {
   } else if (type == '2') {
     webSocket.sendTXT("3");
     lastPingResponse = millis();
+    Serial.println("[WS] PING responded with PONG");
     
   } else if (type == '3') {
     lastPingResponse = millis();
+    Serial.println("[WS] PONG received");
     
   } else if (type == '4') {
     String socketIOData = message.substring(1);
@@ -152,16 +179,7 @@ void handleSocketIOMessage(String data) {
 void handleSocketIOEvent(String eventData) {
   Serial.println("[EVENT] " + eventData);
   
-  if (eventData.indexOf("connection_welcome") != -1) {
-    Serial.println("[HUB] Welcome received!");
-    welcomeReceived = true;
-    
-    // Send acknowledgment with serial number
-    String ackPayload = "42[\"welcome_ack\",{\"received\":true,\"hub_managed\":true,\"optimized\":true,\"serialNumber\":\"" + HUB_SERIAL + "\"}]";
-    webSocket.sendTXT(ackPayload);
-    Serial.println("[HUB] Welcome ACK sent");
-    
-  } else if (eventData.indexOf("command") != -1) {
+  if (eventData.indexOf("command") != -1) {
     Serial.println("[CMD] Command event received");
     parseAndExecuteOptimizedCommand(eventData);
     
@@ -202,7 +220,6 @@ void extractOptimizedAction(String eventData) {
   }
 }
 
-// ✅ OPTIMIZED: Parse and execute commands with compact format
 void parseAndExecuteOptimizedCommand(String eventData) {
   Serial.println("[PARSE] Starting parse...");
   
@@ -225,21 +242,18 @@ void parseAndExecuteOptimizedCommand(String eventData) {
     return;
   }
   
-  // ✅ OPTIMIZED: Extract target device
   String targetSerial = "";
   if (doc["serialNumber"].is<String>()) {
     targetSerial = doc["serialNumber"].as<String>();
   }
   
-  // ✅ OPTIMIZED: Extract action with fallback
   String action = "";
   
   if (doc["esp01_safe"].is<bool>() && doc["esp01_safe"] == true) {
     Serial.println("[PARSE] ESP01 Safe mode");
     
-    action = "toggle_door"; // Default
+    action = "toggle_door";
     
-    // Use stored action if recent
     if (millis() - lastCommand.timestamp < 3000 && lastCommand.action != "") {
       action = lastCommand.action;
       Serial.println("[PARSE] Using stored action: " + action);
@@ -255,7 +269,6 @@ void parseAndExecuteOptimizedCommand(String eventData) {
     }
   }
   
-  // Use stored target if not in current command
   if (targetSerial == "" && lastCommand.targetSerial != "" && millis() - lastCommand.timestamp < 3000) {
     targetSerial = lastCommand.targetSerial;
     Serial.println("[PARSE] Using stored target: " + targetSerial);
@@ -273,9 +286,7 @@ void parseAndExecuteOptimizedCommand(String eventData) {
   
   Serial.println("[PARSE] Final: " + targetSerial + " -> " + action);
   
-  // ✅ OPTIMIZED: Send compact command to MEGA
   String megaCommand = "CMD:" + targetSerial + ":" + action;
-  Serial.println(megaCommand);
   Serial.println("[MEGA-TX] " + megaCommand);
 }
 
@@ -285,23 +296,22 @@ void sendDeviceOnline() {
     return;
   }
   
-  // ✅ OPTIMIZED: Compact device online format
-  String json = "{";
-  json += "\"deviceId\":\"" + HUB_SERIAL + "\",";
-  json += "\"serialNumber\":\"" + HUB_SERIAL + "\",";
-  json += "\"deviceType\":\"HUB_GATEWAY_OPT\",";
-  json += "\"firmware_version\":\"" + String(FIRMWARE_VERSION) + "\",";
-  json += "\"hub_managed\":true,";
-  json += "\"hub_id\":\"" + String(HUB_ID) + "\",";
-  json += "\"connection_type\":\"hub_optimized\",";
-  json += "\"esp01_optimized\":true,";
-  json += "\"compact_data\":true";
-  json += "}";
-  
-  String payload = "42[\"device_online\"," + json + "]";
-  webSocket.sendTXT(payload);
-  
-  Serial.println("[ONLINE] Sent device_online");
+  StaticJsonDocument<512> doc;
+  doc["deviceId"] = HUB_SERIAL;
+  doc["serialNumber"] = HUB_SERIAL;
+  doc["deviceType"] = "HUB_GATEWAY_OPT";
+  doc["firmware_version"] = FIRMWARE_VERSION;
+  doc["hub_managed"] = true;
+  doc["hub_id"] = HUB_ID;
+  doc["connection_type"] = "hub_optimized";
+  doc["esp01_optimized"] = true;
+  doc["compact_data"] = true;
+
+  String payload;
+  serializeJson(doc, payload);
+  String fullPayload = "42[\"device_online\"," + payload + "]";
+  webSocket.sendTXT(fullPayload);
+  Serial.println("[ONLINE] Sent device_online: " + fullPayload);
 }
 
 void checkWebSocketHealth() {
@@ -315,13 +325,18 @@ void checkWebSocketHealth() {
 
 void loop() {
   webSocket.loop(); 
+
+   // Check connection status first
+  checkConnectionStatus();
   
-  // Send ping every 15s
+  // Send ping every 20s
   static unsigned long lastManualPing = 0;
-  if (socketConnected && millis() - lastManualPing > 15000) {
+  if (socketConnected && millis() - lastManualPing > 20000) {
     webSocket.sendTXT("2");
     lastManualPing = millis();
+    Serial.println("[LOOP] Sent manual PING");
   }
+
 
   static unsigned long lastWSCheck = 0;
   if (millis() - lastWSCheck > 10000) {
@@ -329,7 +344,7 @@ void loop() {
     lastWSCheck = millis();
   }
   
-  // ✅ OPTIMIZED: Handle compact responses from MEGA
+  // Handle compact responses from MEGA
   if (Serial.available()) {
     String response = Serial.readStringUntil('\n');
     response.trim();
@@ -343,29 +358,25 @@ void loop() {
       
       Serial.println("[RESP] Processing response");
       
-      // ✅ OPTIMIZED: Check if response is compact and expand if needed
       if (json.indexOf("\"s\":") != -1 && json.indexOf("\"d\":") != -1) {
-        // This is compact format, expand it
         String expandedJson = expandCompactResponse(json);
         String payload = "42[\"command_response\"," + expandedJson + "]";
         webSocket.sendTXT(payload);
         
-        Serial.println("[RESP] Compact expanded and sent");
+        Serial.println("[RESP] Compact expanded and sent: " + payload);
       } else {
-        // Standard format
         String payload = "42[\"command_response\"," + json + "]";
         webSocket.sendTXT(payload);
         
-        Serial.println("[RESP] Standard sent");
+        Serial.println("[RESP] Standard sent: " + payload);
       }
     } else if (response.startsWith("STS:")) {
       String json = response.substring(4);
       
-      // Forward status update
       String payload = "42[\"deviceStatus\"," + json + "]";
       webSocket.sendTXT(payload);
       
-      Serial.println("[STATUS] Forwarded");
+      Serial.println("[STATUS] Forwarded: " + payload);
     }
   }
   
@@ -374,7 +385,6 @@ void loop() {
   if (millis() - lastStatus > 30000) {
     Serial.println("\n[STATUS] Hub: " + HUB_SERIAL);
     Serial.println("[STATUS] Connected: " + String(socketConnected));
-    Serial.println("[STATUS] Welcome: " + String(welcomeReceived));
     Serial.println("[STATUS] Uptime: " + String(millis() / 1000) + "s\n");
     lastStatus = millis();
   }
@@ -383,15 +393,13 @@ void loop() {
   delay(5);
 }
 
-// ✅ OPTIMIZED: Expand compact response to full format
 String expandCompactResponse(String compactJson) {
   JsonDocument doc;
   if (deserializeJson(doc, compactJson) != DeserializationError::Ok) {
     Serial.println("[EXPAND] Parse error, returning original");
-    return compactJson; // Return as-is if parse fails
+    return compactJson;
   }
   
-  // Extract compact fields
   String success = doc["s"].is<String>() ? doc["s"].as<String>() : (doc["s"].as<int>() == 1 ? "true" : "false");
   String result = doc["r"].is<String>() ? doc["r"].as<String>() : "processed";
   String deviceId = doc["d"].is<String>() ? doc["d"].as<String>() : "";
@@ -399,7 +407,6 @@ String expandCompactResponse(String compactJson) {
   int angle = doc["a"].is<int>() ? doc["a"].as<int>() : 0;
   unsigned long timestamp = doc["t"].is<unsigned long>() ? doc["t"].as<unsigned long>() : millis();
   
-  // Create expanded JSON
   String expanded = "{";
   expanded += "\"success\":" + success + ",";
   expanded += "\"result\":\"" + result + "\",";
