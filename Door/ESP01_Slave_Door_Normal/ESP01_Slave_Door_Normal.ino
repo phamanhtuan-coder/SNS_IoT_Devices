@@ -1,31 +1,27 @@
-#define DEVICE_ID 1
+#define DEVICE_ID 1  // Change this for each door (1-7)
 #define FIRMWARE_VERSION "4.0.0"
 
 #include <ESP8266WiFi.h>
 #include <espnow.h>
+#include <Ticker.h>
 
 // GATEWAY MAC ADDRESS
 uint8_t gatewayMAC[6] = {0x48, 0x3F, 0xDA, 0x1F, 0x4A, 0xA6};
-String DEVICE_SERIAL = "SERL27JUN2501JYR2RKVVX08V40YMGTW";
+String DEVICE_SERIAL = "SERL27JUN2501JYR2RKVVX08V40YMGTW";  // Change for each device
 
 // ESP-01 PIN CONFIGURATION
-#define SERVO_PIN 2
+#define SIGNAL_PIN 2  // GPIO2 - sends to UNO Receive
 
-// SERVO CONTROL
-volatile int currentAngle = 0;
-const int SERVO_MIN_PULSE = 544;
-const int SERVO_MAX_PULSE = 2400;
-
-// ✅ OPTIMIZED: Simplified ESP-NOW message structure - reduced size
+// ESP-NOW message structure
 struct CompactMessage {
   char type[4];        // "CMD", "ACK", "HBT" (3 chars + null)
   char action[4];      // "OPN", "CLS", "TGL" (3 chars + null)  
   int angle;           // Current servo angle
   bool success;        // Command success
-  unsigned long ts;    // Timestamp (shortened)
+  unsigned long ts;    // Timestamp
 };
 
-// ✅ FIXED: Door state enum with prefixed names to avoid conflicts
+// Door state enum
 enum DoorState { 
   DOOR_CLOSED = 0, 
   DOOR_OPENING = 1, 
@@ -36,7 +32,7 @@ enum DoorState {
 DoorState doorState = DOOR_CLOSED;
 bool isMoving = false;
 
-// ✅ CRITICAL: Prevent callback-to-callback sending
+// Prevent callback-to-callback sending
 volatile bool needSendHeartbeat = false;
 volatile bool needSendResponse = false;
 volatile bool needSendStatus = false;
@@ -62,20 +58,20 @@ void setup() {
   Serial.begin(115200);
   delay(2000);
   
-  Serial.println("ESP-01 Door v4.0.0");
+  Serial.println("ESP-01 Door v4.0.0 (UNO Signal)");
   Serial.println("ID:" + String(DEVICE_ID));
   Serial.println("Serial:" + DEVICE_SERIAL);
   
-  // Initialize servo
-  pinMode(SERVO_PIN, OUTPUT);
-  setServoAngle(0);
-  currentAngle = 0;
+  // Initialize signal pin
+  pinMode(SIGNAL_PIN, OUTPUT);
+  digitalWrite(SIGNAL_PIN, LOW);
+  
   doorState = DOOR_CLOSED;
   
   // Setup ESP-NOW
   setupESPNow();
   
-  Serial.println("Ready");
+  Serial.println("Ready - Pin " + String(SIGNAL_PIN) + " to UNO");
   delay(1000);
   needSendHeartbeat = true;
 }
@@ -110,7 +106,6 @@ void onDataSent(uint8_t *mac_addr, uint8_t sendStatus) {
   Serial.println("TX#" + String(msgSent) + (sendStatus == 0 ? " OK" : " FAIL"));
 }
 
-// ✅ OPTIMIZED: Minimal processing in callback
 void onDataReceived(uint8_t *mac_addr, uint8_t *data, uint8_t len) {
   msgReceived++;
   
@@ -127,7 +122,6 @@ void onDataReceived(uint8_t *mac_addr, uint8_t *data, uint8_t len) {
   String type = String(rxBuffer.type);
   Serial.println("RX#" + String(msgReceived) + ":" + type);
   
-  // ✅ CRITICAL: Set flags only - NO SENDING
   if (type == "CMD") {
     strncpy(pendingAction, rxBuffer.action, 3);
     pendingAction[3] = '\0';
@@ -138,105 +132,63 @@ void onDataReceived(uint8_t *mac_addr, uint8_t *data, uint8_t len) {
   }
 }
 
-// ✅ OPTIMIZED: Main loop processing with compact commands
 void processCommand() {
   if (!needSendResponse) return;
   needSendResponse = false;
   
   String action = String(pendingAction);
-  Serial.println("CMD:" + action);
   
-  bool success = false;
-  
-  if (isMoving) {
-    success = false;
+  if (action == "OPN" || action == "CLS" || action == "TGL") {
+    // Send device ID as pulse count to UNO
+    sendPulsesToUNO(DEVICE_ID);
     
-  } else if (action == "OPN" && doorState == DOOR_CLOSED) {
-    openDoor();
-    success = true;
-    
-  } else if (action == "CLS" && doorState == DOOR_OPEN) {
-    closeDoor();
-    success = true;
-    
-  } else if (action == "TGL") {
-    if (doorState == DOOR_CLOSED) {
-      openDoor();
-      success = true;
-    } else if (doorState == DOOR_OPEN) {
-      closeDoor();
-      success = true;
+    // Update door state
+    if (action == "OPN") {
+      doorState = DOOR_OPEN;
+    } else if (action == "CLS") {
+      doorState = DOOR_CLOSED;
+    } else if (action == "TGL") {
+      doorState = (doorState == DOOR_CLOSED) ? DOOR_OPEN : DOOR_CLOSED;
     }
+    
+    pendingSuccess = true;
+    Serial.println("Command: " + action + " -> " + String(DEVICE_ID) + " pulses");
+    needSendStatus = true;
   }
   
-  pendingSuccess = success;
   sendResponse();
 }
 
-void openDoor() {
-  if (isMoving || doorState == DOOR_OPEN) return;
+void sendPulsesToUNO(int pulseCount) {
+  Serial.println("Sending " + String(pulseCount) + " pulses to UNO");
   
-  Serial.println("Opening...");
-  doorState = DOOR_OPENING;
-  isMoving = true;
+  // Ensure pin starts HIGH
+  digitalWrite(SIGNAL_PIN, HIGH);
+  delay(100);
   
-  moveServo(180);
-  
-  doorState = DOOR_OPEN;
-  isMoving = false;
-  Serial.println("Opened");
-  needSendStatus = true;
-}
-
-void closeDoor() {
-  if (isMoving || doorState == DOOR_CLOSED) return;
-  
-  Serial.println("Closing...");
-  doorState = DOOR_CLOSING;
-  isMoving = true;
-  
-  moveServo(0);
-  
-  doorState = DOOR_CLOSED;
-  isMoving = false;
-  Serial.println("Closed");
-  needSendStatus = true;
-}
-
-void moveServo(int angle) {
-  if (angle < 0) angle = 0;
-  if (angle > 180) angle = 180;
-  
-  int step = (angle > currentAngle) ? 5 : -5;
-  
-  while (currentAngle != angle) {
-    if (abs(currentAngle - angle) < 5) {
-      currentAngle = angle;
-    } else {
-      currentAngle += step;
-    }
+  // Send pulse train - each pulse is 250ms LOW, 100ms HIGH
+  for (int i = 0; i < pulseCount; i++) {
+    digitalWrite(SIGNAL_PIN, LOW);   // Pull pin LOW (active)
+    delay(250);
+    digitalWrite(SIGNAL_PIN, HIGH);  // Release pin HIGH (inactive)
     
-    setServoAngle(currentAngle);
-    delay(20);
-    yield();
+    // Delay between pulses (except last)
+    if (i < pulseCount - 1) {
+      delay(100);
+    }
   }
+  
+  // Ensure pin stays HIGH after transmission
+  digitalWrite(SIGNAL_PIN, HIGH);
+  Serial.println("Pulses sent successfully");
 }
 
-void setServoAngle(int angle) {
-  int pulseWidth = map(angle, 0, 180, SERVO_MIN_PULSE, SERVO_MAX_PULSE);
-  digitalWrite(SERVO_PIN, HIGH);
-  delayMicroseconds(pulseWidth);
-  digitalWrite(SERVO_PIN, LOW);
-  delayMicroseconds(20000 - pulseWidth);
-}
-
-// ✅ OPTIMIZED: Compact response format
 void sendResponse() {
   memset(&txBuffer, 0, sizeof(txBuffer));
   
   strncpy(txBuffer.type, "ACK", 3);
   strncpy(txBuffer.action, pendingAction, 3);
-  txBuffer.angle = currentAngle;
+  txBuffer.angle = (doorState == DOOR_OPEN) ? 180 : 0;  // Simulated angle
   txBuffer.success = pendingSuccess;
   txBuffer.ts = millis();
   
@@ -251,8 +203,8 @@ void sendHeartbeat() {
   memset(&txBuffer, 0, sizeof(txBuffer));
   
   strncpy(txBuffer.type, "HBT", 3);
-  strncpy(txBuffer.action, "ALV", 3);  // "ALIVE" shortened
-  txBuffer.angle = currentAngle;
+  strncpy(txBuffer.action, "ALV", 3);
+  txBuffer.angle = (doorState == DOOR_OPEN) ? 180 : 0;
   txBuffer.success = true;
   txBuffer.ts = millis();
   
@@ -268,15 +220,15 @@ void sendStatus() {
   
   memset(&txBuffer, 0, sizeof(txBuffer));
   
-  strncpy(txBuffer.type, "STS", 3);  // "STATUS" shortened
+  strncpy(txBuffer.type, "STS", 3);
   
-  // ✅ OPTIMIZED: State as 3-char codes
-  if (doorState == DOOR_CLOSED) strncpy(txBuffer.action, "CLD", 3);       // "CLOSED"
-  else if (doorState == DOOR_OPENING) strncpy(txBuffer.action, "OPG", 3); // "OPENING"
-  else if (doorState == DOOR_OPEN) strncpy(txBuffer.action, "OPD", 3);    // "OPENED"
-  else strncpy(txBuffer.action, "CLG", 3);                                // "CLOSING"
+  // State as 3-char codes
+  if (doorState == DOOR_CLOSED) strncpy(txBuffer.action, "CLD", 3);
+  else if (doorState == DOOR_OPENING) strncpy(txBuffer.action, "OPG", 3);
+  else if (doorState == DOOR_OPEN) strncpy(txBuffer.action, "OPD", 3);
+  else strncpy(txBuffer.action, "CLG", 3);
   
-  txBuffer.angle = currentAngle;
+  txBuffer.angle = (doorState == DOOR_OPEN) ? 180 : 0;
   txBuffer.success = true;
   txBuffer.ts = millis();
   
@@ -292,12 +244,12 @@ void checkConnection() {
 }
 
 void loop() {
-  // ✅ CRITICAL: All sending in main loop
+  // Process commands and send responses
   processCommand();
   sendHeartbeat();
   sendStatus();
   
-  // Timers
+  // Heartbeat timer
   if (millis() - lastHeartbeat > 30000) {
     needSendHeartbeat = true;
   }
@@ -314,14 +266,8 @@ void loop() {
   if (millis() - lastPrint > 45000) {
     Serial.println("GW:" + String(gatewayOnline ? "ON" : "OFF") + 
                    " Door:" + String(doorState) + 
-                   " Angle:" + String(currentAngle) + 
                    " TX/RX:" + String(msgSent) + "/" + String(msgReceived));
     lastPrint = millis();
-  }
-  
-  // Keep servo stable
-  if (!isMoving) {
-    setServoAngle(currentAngle);
   }
   
   yield();
