@@ -3,10 +3,18 @@
 #include <WebServer.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
-#include "SD_MMC.h"
-#include "FS.h"
+#include <SD_MMC.h>
 #include <EEPROM.h>
 #include <WiFiUdp.h>
+#include <Base64.h>
+
+// Debug macro
+#define DEBUG 0
+#if DEBUG
+  #define DEBUG_PRINT(x) Serial.println(x)
+#else
+  #define DEBUG_PRINT(x)
+#endif
 
 // Camera model
 #define CAMERA_MODEL_AI_THINKER
@@ -37,11 +45,11 @@ WiFiUDP udp;
 // Motion sensor
 #define MOTION_SENSOR_PIN 13
 
-// JSON buffer sizes
-constexpr size_t STATUS_JSON_SIZE = JSON_OBJECT_SIZE(12) + 300;
-constexpr size_t COMMAND_JSON_SIZE = JSON_OBJECT_SIZE(8) + 200;
-constexpr size_t CONFIG_JSON_SIZE = JSON_OBJECT_SIZE(6) + 150;
-constexpr size_t CAMERA_ONLINE_JSON_SIZE = JSON_OBJECT_SIZE(10) + 400;
+// JSON buffer sizes (optimized)
+constexpr size_t STATUS_JSON_SIZE = JSON_OBJECT_SIZE(10) + 200;
+constexpr size_t COMMAND_JSON_SIZE = JSON_OBJECT_SIZE(6) + 150;
+constexpr size_t CONFIG_JSON_SIZE = JSON_OBJECT_SIZE(4) + 100;
+constexpr size_t CAMERA_ONLINE_JSON_SIZE = JSON_OBJECT_SIZE(8) + 250;
 
 // Global objects
 WebServer httpServer(80);
@@ -64,100 +72,65 @@ bool isHotspotMode = false;
 String muxStreamKey = "";
 
 // Camera settings
-int currentQuality = 10;
-framesize_t currentFrameSize = FRAMESIZE_VGA;
+int currentQuality = 12;
+framesize_t currentFrameSize = FRAMESIZE_QVGA;
 
 // Timing intervals
 const unsigned long PING_INTERVAL = 20000;
 const unsigned long STATUS_INTERVAL = 30000;
-const unsigned long FRAME_INTERVAL = 100; // 10 FPS
+const unsigned long FRAME_INTERVAL = 100;
 const unsigned long RECONNECT_BASE_INTERVAL = 10000;
 unsigned long reconnectInterval = RECONNECT_BASE_INTERVAL;
 
-// Static buffers for optimization
-static char websocketPath[256];
-static char jsonBuffer[512];
+// Static buffers
+static char websocketPath[128];
+static char jsonBuffer[256];
 
-// HTML in PROGMEM to save RAM
+// HTML in PROGMEM (optimized)
 const char CONFIG_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html><html><head>
 <title>ESP32-CAM Config</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-body{font-family:Arial,sans-serif;padding:20px;background:#f0f0f0}
-.container{max-width:400px;margin:0 auto;background:white;padding:30px;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}
-h1{color:#333;text-align:center;margin-bottom:30px}
-.form-group{margin:20px 0}
-label{display:block;margin-bottom:5px;font-weight:bold;color:#555}
-input[type="text"],input[type="password"]{width:100%;padding:12px;border:1px solid #ddd;border-radius:4px;font-size:16px}
-input[type="submit"]{width:100%;padding:12px;background:#007bff;color:white;border:none;border-radius:4px;font-size:16px;cursor:pointer}
+body{font-family:Arial;padding:10px;background:#f0f0f0}
+.container{max-width:400px;margin:0 auto;background:#fff;padding:20px;border-radius:5px}
+h1{color:#333;text-align:center;font-size:24px}
+.form-group{margin:15px 0}
+label{display:block;font-weight:bold;color:#555}
+input[type="text"],input[type="password"]{width:100%;padding:10px;border:1px solid #ddd;border-radius:4px}
+input[type="submit"]{width:100%;padding:10px;background:#007bff;color:#fff;border:none;border-radius:4px;cursor:pointer}
 input[type="submit"]:hover{background:#0056b3}
-.status{text-align:center;margin-top:20px;padding:10px;border-radius:4px}
-.success{background:#d4edda;color:#155724;border:1px solid #c3e6cb}
-.error{background:#f8d7da;color:#721c24;border:1px solid #f5c6cb}
+.status{text-align:center;margin-top:15px;padding:8px;border-radius:4px}
+.success{background:#d4edda;color:#155724}
+.error{background:#f8d7da;color:#721c24}
 </style>
 </head><body>
 <div class="container">
 <h1>ESP32-CAM WiFi Setup</h1>
 <form action='/config_wifi' method='POST'>
 <div class='form-group'>
-<label for='ssid'>WiFi Network Name (SSID):</label>
-<input type='text' id='ssid' name='ssid' required placeholder='Enter WiFi name'>
+<label for='ssid'>WiFi SSID:</label>
+<input type='text' id='ssid' name='ssid' required>
 </div>
 <div class='form-group'>
-<label for='password'>WiFi Password:</label>
-<input type='password' id='password' name='password' placeholder='Enter WiFi password'>
+<label for='password'>Password:</label>
+<input type='password' id='password' name='password'>
 </div>
-<input type='submit' value='Save and Connect'>
+<input type='submit' value='Save'>
 </form>
-<div class="status">
-<p>Device will restart and connect to the specified network after saving.</p>
-</div>
+<div class="status"><p>Device will restart after saving.</p></div>
 </div>
 </body></html>
 )rawliteral";
 
-// Base64 encoding functions
-const char* base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-String base64_encode(unsigned char const* bytes_to_encode, unsigned int in_len) {
-  String ret;
-  int i = 0;
-  int j = 0;
-  unsigned char char_array_3[3];
-  unsigned char char_array_4[4];
-
-  while (in_len--) {
-    char_array_3[i++] = *(bytes_to_encode++);
-    if (i == 3) {
-      char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
-      char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
-      char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
-      char_array_4[3] = char_array_3[2] & 0x3f;
-
-      for(i = 0; (i <4) ; i++)
-        ret += base64_chars[char_array_4[i]];
-      i = 0;
-    }
-  }
-
-  if (i) {
-    for(j = i; j < 3; j++)
-      char_array_3[j] = '\0';
-
-    char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
-    char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
-    char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
-    char_array_4[3] = char_array_3[2] & 0x3f;
-
-    for (j = 0; (j < i + 1); j++)
-      ret += base64_chars[char_array_4[j]];
-
-    while((i++ < 3))
-      ret += '=';
-  }
-
-  return ret;
+// Base64 encoding using library
+String base64_encode(uint8_t* data, size_t len) {
+  size_t encodedLen = Base64.encodedLength(len);
+  char* encoded = new char[encodedLen + 1];
+  Base64.encode(encoded, (char*)data, len);
+  String result = String(encoded);
+  delete[] encoded;
+  return result;
 }
 
 /**************************************************************
@@ -166,7 +139,7 @@ String base64_encode(unsigned char const* bytes_to_encode, unsigned int in_len) 
 
 void initEEPROM() {
   EEPROM.begin(EEPROM_SIZE);
-  Serial.println(F("[EEPROM] Initialized"));
+  DEBUG_PRINT(F("[EEPROM] Initialized"));
 }
 
 String readEEPROMString(int address, int maxLength) {
@@ -187,6 +160,7 @@ void writeEEPROMString(int address, const String& data, int maxLength) {
   }
   EEPROM.write(address + len, 0);
   EEPROM.commit();
+  DEBUG_PRINT(F("[EEPROM] Wrote string"));
 }
 
 /**************************************************************
@@ -194,33 +168,28 @@ void writeEEPROMString(int address, const String& data, int maxLength) {
  **************************************************************/
 
 bool connectToWiFi(const String& ssid, const String& password) {
-  Serial.print(F("[WiFi] Connecting to "));
-  Serial.println(ssid);
-  
+  DEBUG_PRINT(F("[WiFi] Connecting to ") + ssid);
   WiFi.begin(ssid.c_str(), password.c_str());
   unsigned long startTime = millis();
   
   while (WiFi.status() != WL_CONNECTED && millis() - startTime < 30000) {
     delay(500);
-    Serial.print(F("."));
+    DEBUG_PRINT(F("."));
   }
   
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println(F("\n[WiFi] Connected! IP: "));
-    Serial.println(WiFi.localIP());
+    DEBUG_PRINT(F("[WiFi] Connected! IP: ") + WiFi.localIP().toString());
     return true;
   }
   
-  Serial.println(F("\n[WiFi] Connection failed"));
+  DEBUG_PRINT(F("[WiFi] Connection failed"));
   return false;
 }
 
 void startHotspot() {
   WiFi.softAP(HOTSPOT_SSID, HOTSPOT_PASSWORD);
-  Serial.print(F("[Hotspot] Started: "));
-  Serial.println(HOTSPOT_SSID);
-  Serial.print(F("[Hotspot] IP: "));
-  Serial.println(WiFi.softAPIP());
+  DEBUG_PRINT(F("[Hotspot] Started: ") + String(HOTSPOT_SSID));
+  DEBUG_PRINT(F("[Hotspot] IP: ") + WiFi.softAPIP().toString());
   isHotspotMode = true;
 }
 
@@ -235,14 +204,14 @@ void handleUDP() {
     int len = udp.read(packetBuffer, 255);
     if (len > 0) packetBuffer[len] = 0;
     
-    DynamicJsonDocument doc(512);
+    StaticJsonDocument<200> doc;
     DeserializationError error = deserializeJson(doc, packetBuffer);
     
     if (!error && doc.containsKey("ssid") && doc.containsKey("password")) {
       String ssid = doc["ssid"].as<String>();
       String password = doc["password"].as<String>();
       
-      Serial.println(F("[UDP] Received WiFi credentials"));
+      DEBUG_PRINT(F("[UDP] Received WiFi credentials"));
       
       writeEEPROMString(WIFI_SSID_ADDR, ssid, 100);
       writeEEPROMString(WIFI_PASS_ADDR, password, 100);
@@ -268,7 +237,7 @@ void handleUDP() {
  **************************************************************/
 
 void joinCameraNamespace() {
-  Serial.println(F("[Socket.IO] Joining /camera namespace..."));
+  DEBUG_PRINT(F("[Socket.IO] Joining /camera namespace..."));
   webSocket.sendTXT("40/camera,");
 }
 
@@ -286,7 +255,7 @@ void sendSocketIOEvent(const char* eventName, const String& jsonData) {
 void sendCameraOnline() {
   if (!namespaceConnected || cameraOnlineSent) return;
   
-  DynamicJsonDocument doc(CAMERA_ONLINE_JSON_SIZE);
+  StaticJsonDocument<250> doc;
   doc["serialNumber"] = SERIAL_NUMBER;
   doc["deviceType"] = DEVICE_TYPE;
   doc["firmware_version"] = FIRMWARE_VERSION;
@@ -295,8 +264,6 @@ void sendCameraOnline() {
   doc["wifi_rssi"] = WiFi.RSSI();
   doc["capabilities"]["streaming"] = true;
   doc["capabilities"]["photo_capture"] = true;
-  doc["capabilities"]["motion_detection"] = true;
-  doc["capabilities"]["sd_storage"] = sdCardAvailable;
   
   String jsonString;
   serializeJson(doc, jsonString);
@@ -307,17 +274,15 @@ void sendCameraOnline() {
 void sendCameraStatus() {
   if (!namespaceConnected) return;
   
-  DynamicJsonDocument doc(STATUS_JSON_SIZE);
+  StaticJsonDocument<200> doc;
   doc["serialNumber"] = SERIAL_NUMBER;
   doc["status"] = streamActive ? "streaming" : "idle";
   doc["streamActive"] = streamActive;
   doc["resolution"] = currentFrameSize;
   doc["quality"] = currentQuality;
   doc["clients"] = streamClients;
-  doc["motionDetectionEnabled"] = motionDetectionEnabled;
   doc["uptime"] = millis() / 1000;
   doc["freeHeap"] = ESP.getFreeHeap();
-  doc["timestamp"] = millis();
   
   String jsonString;
   serializeJson(doc, jsonString);
@@ -329,16 +294,16 @@ void sendFrameToServer() {
 
   camera_fb_t * fb = esp_camera_fb_get();
   if (!fb) {
-    Serial.println(F("[Camera] Failed to capture frame"));
+    DEBUG_PRINT(F("[Camera] Failed to capture frame"));
     return;
   }
 
   String frameBase64 = base64_encode(fb->buf, fb->len);
   
-  DynamicJsonDocument doc(256);
+  StaticJsonDocument<200> doc;
   doc["serialNumber"] = SERIAL_NUMBER;
   doc["type"] = "frame";
-  doc["timestamp"] = millis();
+  doc["streamKey"] = muxStreamKey;
   doc["data"] = frameBase64;
 
   String jsonString;
@@ -355,16 +320,16 @@ void handleWebSocketMessage(const String& message) {
   
   switch(engineIOType) {
     case '0':
-      Serial.println(F("[Engine.IO] OPEN"));
+      DEBUG_PRINT(F("[Engine.IO] OPEN"));
       delay(2000);
       joinCameraNamespace();
       break;
     case '2':
-      Serial.println(F("[Engine.IO] PING"));
+      DEBUG_PRINT(F("[Engine.IO] PING"));
       webSocket.sendTXT("3");
       break;
     case '3':
-      Serial.println(F("[Engine.IO] PONG"));
+      DEBUG_PRINT(F("[Engine.IO] PONG"));
       break;
     case '4':
       handleSocketIOMessage(message.substring(1));
@@ -375,7 +340,7 @@ void handleWebSocketMessage(const String& message) {
 void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
   switch(type) {
     case WStype_DISCONNECTED:
-      Serial.printf("[WebSocket] Disconnected. Attempts: %d\n", reconnectAttempts);
+      DEBUG_PRINT(F("[WebSocket] Disconnected"));
       isConnected = false;
       namespaceConnected = false;
       cameraOnlineSent = false;
@@ -384,7 +349,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
       reconnectInterval = min(reconnectInterval * 2, 60000UL);
       break;
     case WStype_CONNECTED:
-      Serial.printf("[WebSocket] Connected: %s\n", payload);
+      DEBUG_PRINT(F("[WebSocket] Connected: ") + String((char*)payload));
       isConnected = true;
       namespaceConnected = false;
       cameraOnlineSent = false;
@@ -395,12 +360,10 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
       handleWebSocketMessage(String((char*)payload));
       break;
     case WStype_PING:
-      Serial.println(F("[WebSocket] Server ping"));
+      DEBUG_PRINT(F("[WebSocket] Server ping"));
       break;
     case WStype_PONG:
-      Serial.println(F("[WebSocket] Server pong"));
-      break;
-    default:
+      DEBUG_PRINT(F("[WebSocket] Server pong"));
       break;
   }
 }
@@ -413,7 +376,7 @@ void handleSocketIOMessage(const String& socketIOData) {
   switch(socketIOType) {
     case '0':
       if (socketIOData.indexOf("/camera") != -1) {
-        Serial.println(F("[Socket.IO] Connected to /camera namespace"));
+        DEBUG_PRINT(F("[Socket.IO] Connected to /camera namespace"));
         namespaceConnected = true;
         delay(3000);
         sendCameraOnline();
@@ -423,8 +386,7 @@ void handleSocketIOMessage(const String& socketIOData) {
       parseSocketIOEvent(socketIOData.substring(1));
       break;
     case '4':
-      Serial.println(F("[Socket.IO] ERROR: "));
-      Serial.println(socketIOData);
+      DEBUG_PRINT(F("[Socket.IO] ERROR: ") + socketIOData);
       if (!namespaceConnected) {
         delay(3000);
         joinCameraNamespace();
@@ -454,7 +416,7 @@ void parseSocketIOEvent(const String& eventData) {
   if (jsonStart != -1) {
     String jsonData = processedData.substring(jsonStart, processedData.lastIndexOf('}') + 1);
     
-    DynamicJsonDocument doc(1024);
+    StaticJsonDocument<512> doc;
     DeserializationError err = deserializeJson(doc, jsonData);
     
     if (!err) {
@@ -462,8 +424,7 @@ void parseSocketIOEvent(const String& eventData) {
         String action = doc["action"];
         if (action == "setStreamKey") {
           muxStreamKey = doc["params"]["streamKey"].as<String>();
-          Serial.print(F("[Mux] Received stream key: "));
-          Serial.println(muxStreamKey);
+          DEBUG_PRINT(F("[Mux] Received stream key: ") + muxStreamKey);
         } else {
           handleCommand(eventName, doc);
         }
@@ -473,15 +434,14 @@ void parseSocketIOEvent(const String& eventData) {
 }
 
 void sendCommandResponse(bool success, const String& action, const String& message, const String& additionalData = "") {
-  DynamicJsonDocument response(COMMAND_JSON_SIZE);
+  StaticJsonDocument<150> response;
   response["success"] = success;
   response["serialNumber"] = SERIAL_NUMBER;
   response["commandId"] = action;
-  response["timestamp"] = millis();
   response["message"] = message;
   
   if (additionalData.length() > 0) {
-    DynamicJsonDocument additionalDoc(256);
+    StaticJsonDocument<100> additionalDoc;
     deserializeJson(additionalDoc, additionalData);
     response["data"] = additionalDoc;
   }
@@ -491,13 +451,13 @@ void sendCommandResponse(bool success, const String& action, const String& messa
   sendSocketIOEvent("command_response", jsonString);
 }
 
-void handleCommand(const String& eventName, DynamicJsonDocument& doc) {
+void handleCommand(const String& eventName, JsonDocument& doc) {
   if (eventName == "command") {
     String action = doc["action"];
     
     if (action == "capture") {
       bool saveToSD = doc["params"]["saveToSD"] | true;
-      int quality = doc["params"]["quality"] | 10;
+      int quality = doc["params"]["quality"] | 12;
       
       sensor_t * s = esp_camera_sensor_get();
       s->set_quality(s, quality);
@@ -556,19 +516,19 @@ void handleCommand(const String& eventName, DynamicJsonDocument& doc) {
  **************************************************************/
 
 bool initSDCard() {
-  Serial.println(F("[SD] Initializing SD card..."));
+  DEBUG_PRINT(F("[SD] Initializing SD card..."));
   if (!SD_MMC.begin()) {
-    Serial.println(F("[SD] Initialization failed!"));
+    DEBUG_PRINT(F("[SD] Initialization failed!"));
     sdCardAvailable = false;
     return false;
   }
-  Serial.println(F("[SD] Initialization done."));
+  DEBUG_PRINT(F("[SD] Initialization done."));
   sdCardAvailable = true;
   return true;
 }
 
 bool initCamera() {
-  Serial.println(F("[Camera] Initializing camera..."));
+  DEBUG_PRINT(F("[Camera] Initializing camera..."));
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -589,31 +549,31 @@ bool initCamera() {
   config.pin_pwdn = 32;
   config.pin_reset = -1;
   config.xclk_freq_hz = 20000000;
-  config.frame_size = FRAMESIZE_VGA;
+  config.frame_size = FRAMESIZE_QVGA;
   config.pixel_format = PIXFORMAT_JPEG;
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 10;
+  config.jpeg_quality = 12;
   config.fb_count = 1;
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
-    Serial.printf("[Camera] Initialization failed with error 0x%x\n", err);
+    DEBUG_PRINT(F("[Camera] Initialization failed with error 0x") + String(err, HEX));
     return false;
   }
-  Serial.println(F("[Camera] Initialization done."));
+  DEBUG_PRINT(F("[Camera] Initialization done."));
   return true;
 }
 
 String savePhotoToSD(bool triggeredByMotion) {
   if (!sdCardAvailable) {
-    Serial.println(F("[SD] Cannot save photo: SD card not available"));
+    DEBUG_PRINT(F("[SD] Cannot save photo: SD card not available"));
     return "";
   }
 
   camera_fb_t * fb = esp_camera_fb_get();
   if (!fb) {
-    Serial.println(F("[Camera] Failed to capture photo"));
+    DEBUG_PRINT(F "[Camera] Failed to capture photo"));
     return "";
   }
 
@@ -622,7 +582,7 @@ String savePhotoToSD(bool triggeredByMotion) {
 
   File file = SD_MMC.open(filename, FILE_WRITE);
   if (!file) {
-    Serial.println(F("[SD] Failed to open file for writing"));
+    DEBUG_PRINT(F("[SD] Failed to open file for writing"));
     esp_camera_fb_return(fb);
     return "";
   }
@@ -631,16 +591,14 @@ String savePhotoToSD(bool triggeredByMotion) {
   file.close();
   esp_camera_fb_return(fb);
 
-  Serial.print(F("[SD] Photo saved: "));
-  Serial.println(filename);
+  DEBUG_PRINT(F("[SD] Photo saved: ") + filename);
 
   if (namespaceConnected) {
-    DynamicJsonDocument doc(256);
+    StaticJsonDocument<150> doc;
     doc["serialNumber"] = SERIAL_NUMBER;
     doc["filename"] = filename;
     doc["size"] = SD_MMC.open(filename).size();
     doc["savedToSD"] = true;
-    doc["timestamp"] = millis();
     
     String jsonString;
     serializeJson(doc, jsonString);
@@ -672,10 +630,9 @@ void handleWifiConfig() {
   writeEEPROMString(WIFI_PASS_ADDR, password, 100);
   
   httpServer.send(200, "text/html", 
-    "<div style='text-align:center;padding:50px;font-family:Arial'>"
-    "<h1>WiFi Configuration Saved</h1>"
+    "<div style='text-align:center;padding:20px;font-family:Arial'>"
+    "<h1>WiFi Saved</h1>"
     "<p>Device will restart and connect to the new network.</p>"
-    "<p>Please connect to the new network and access the device via its new IP address.</p>"
     "</div>");
   
   delay(1000);
@@ -686,7 +643,7 @@ void handleWifiConfig() {
 }
 
 void handleStatus() {
-  DynamicJsonDocument doc(STATUS_JSON_SIZE);
+  StaticJsonDocument<200> doc;
   doc["status"] = streamActive ? "streaming" : "idle";
   doc["streamActive"] = streamActive;
   doc["resolution"] = currentFrameSize;
@@ -696,7 +653,6 @@ void handleStatus() {
   doc["freeHeap"] = ESP.getFreeHeap();
   doc["motionDetection"] = motionDetectionEnabled;
   doc["sdCardAvailable"] = sdCardAvailable;
-  doc["timestamp"] = millis();
   
   String response;
   serializeJson(doc, response);
@@ -707,7 +663,7 @@ void handleStatus() {
 
 void handleCommandHTTP() {
   String body = httpServer.arg("plain");
-  DynamicJsonDocument doc(COMMAND_JSON_SIZE);
+  StaticJsonDocument<150> doc;
   
   DeserializationError error = deserializeJson(doc, body);
   if (error) {
@@ -718,20 +674,19 @@ void handleCommandHTTP() {
   String action = doc["action"];
   JsonObject params = doc["params"];
   
-  DynamicJsonDocument response(COMMAND_JSON_SIZE);
+  StaticJsonDocument<150> response;
   response["success"] = false;
   response["action"] = action;
-  response["timestamp"] = millis();
   
   if (action == "capture") {
     bool saveToSD = params["saveToSD"] | true;
-    int quality = params["quality"] | 10;
+    int quality = params["quality"] | 12;
     
     sensor_t * s = esp_camera_sensor_get();
     s->set_quality(s, quality);
     
     String filename = saveToSD ? savePhotoToSD(false) : "";
-    response["success"] = filename != "" || !saveToSD;
+    response["success"] = filename !=衣服 || !saveToSD;
     response["filename"] = filename;
     response["size"] = filename != "" ? SD_MMC.open(filename).size() : 0;
     response["message"] = filename != "" ? "Photo captured" : "Capture failed";
@@ -780,7 +735,7 @@ void handleCommandHTTP() {
 }
 
 void handlePhotos() {
-  DynamicJsonDocument doc(1024);
+  StaticJsonDocument<512> doc;
   JsonArray photosArray = doc.createNestedArray("photos");
   
   if (sdCardAvailable) {
@@ -795,7 +750,6 @@ void handlePhotos() {
         JsonObject photo = photosArray.createNestedObject();
         photo["filename"] = String(file.name());
         photo["size"] = file.size();
-        photo["timestamp"] = file.getLastWrite() * 1000;
         count++;
       }
       file = root.openNextFile();
@@ -845,7 +799,7 @@ void setupWebServer() {
   setupCorsRoutes();
   httpServer.onNotFound(handleNotFound);
   httpServer.begin();
-  Serial.println(F("[HTTP] Server started"));
+  DEBUG_PRINT(F("[HTTP] Server started"));
 }
 
 void setupWebSocket() {
@@ -853,10 +807,7 @@ void setupWebSocket() {
   webSocket.beginSSL(WEBSOCKET_HOST, WEBSOCKET_PORT, websocketPath);
   webSocket.onEvent(webSocketEvent);
   webSocket.setReconnectInterval(reconnectInterval);
-  Serial.print(F("[WebSocket] Connecting to: wss://"));
-  Serial.print(WEBSOCKET_HOST);
-  Serial.print(":");
-  Serial.println(WEBSOCKET_PORT);
+  DEBUG_PRINT(F("[WebSocket] Connecting to: wss://") + String(WEBSOCKET_HOST) + ":" + String(WEBSOCKET_PORT));
 }
 
 void checkMotion() {
@@ -866,7 +817,7 @@ void checkMotion() {
   bool motionState = digitalRead(MOTION_SENSOR_PIN);
 
   if (motionState && !lastMotionState) {
-    Serial.println(F("[Motion] Detected!"));
+    DEBUG_PRINT(F("[Motion] Detected!"));
     if (sdCardAvailable) {
       savePhotoToSD(true);
     }
@@ -881,12 +832,10 @@ void checkMotion() {
 
 void setup() {
   Serial.begin(115200);
-  Serial.setDebugOutput(false); // Reduce debug output for faster operation
-  Serial.println(F("\n=== ESP32-CAM v1.3.1 - Optimized ==="));
-  Serial.print(F("Device Serial: "));
-  Serial.println(SERIAL_NUMBER);
-  Serial.print(F("Device Type: "));
-  Serial.println(DEVICE_TYPE);
+  Serial.setDebugOutput(false);
+  DEBUG_PRINT(F("\n=== ESP32-CAM v1.3.1 - Optimized ==="));
+  DEBUG_PRINT(F("Device Serial: ") + String(SERIAL_NUMBER));
+  DEBUG_PRINT(F("Device Type: ") + String(DEVICE_TYPE));
   
   pinMode(MOTION_SENSOR_PIN, INPUT);
   initEEPROM();
@@ -899,14 +848,13 @@ void setup() {
   } else {
     startHotspot();
     udp.begin(UDP_PORT);
-    Serial.print(F("[UDP] Listening on port "));
-    Serial.println(UDP_PORT);
+    DEBUG_PRINT(F("[UDP] Listening on port ") + String(UDP_PORT));
   }
   
   initSDCard();
   
   if (!initCamera()) {
-    Serial.println(F("[ERROR] Camera initialization failed. Restarting..."));
+    DEBUG_PRINT(F("[ERROR] Camera initialization failed. Restarting..."));
     ESP.restart();
   }
   
@@ -922,9 +870,8 @@ void loop() {
   if (isHotspotMode) {
     handleUDP();
   } else {
-    // Check WiFi connection
     if (WiFi.status() != WL_CONNECTED) {
-      Serial.println(F("[WiFi] Connection lost, reconnecting..."));
+      DEBUG_PRINT(F("[WiFi] Connection lost, reconnecting..."));
       String savedSSID = readEEPROMString(WIFI_SSID_ADDR, 100);
       String savedPassword = readEEPROMString(WIFI_PASS_ADDR, 100);
       
@@ -937,35 +884,25 @@ void loop() {
     
     unsigned long currentTime = millis();
     
-    // Handle connected state operations
     if (isConnected && namespaceConnected && cameraOnlineSent) {
-      // Send status updates
       if (currentTime - lastStatusUpdate > STATUS_INTERVAL) {
         sendCameraStatus();
         lastStatusUpdate = currentTime;
-        Serial.printf("[Status] Sent - Free heap: %d bytes, RSSI: %d dBm\n", 
-                     ESP.getFreeHeap(), WiFi.RSSI());
+        DEBUG_PRINT(F("[Status] Sent - Free heap: ") + String(ESP.getFreeHeap()) + " bytes");
       }
       
-      // Send video frames with rate limiting
       if (streamActive && currentTime - lastFrameSent > FRAME_INTERVAL) {
         sendFrameToServer();
         lastFrameSent = currentTime;
       }
     } else if (currentTime - lastStatusUpdate > 30000) {
-      // Debug connection state
       reconnectAttempts++;
-      Serial.printf("[WebSocket] Status - Connected: %s, Namespace: %s, Online Sent: %s\n",
-                    isConnected ? "YES" : "NO", 
-                    namespaceConnected ? "YES" : "NO",
-                    cameraOnlineSent ? "YES" : "NO");
+      DEBUG_PRINT(F("[WebSocket] Status - Connected: ") + String(isConnected ? "YES" : "NO"));
       lastStatusUpdate = currentTime;
     }
     
-    // Check motion detection
     checkMotion();
   }
   
-  // Small delay to prevent WDT reset
   delay(5);
 }
