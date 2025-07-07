@@ -18,6 +18,7 @@
 #define LIGHT_SENSOR_PIN 24  // Digital pin for LDR module
 #define SOIL_MOISTURE_PIN A2
 #define PUMP_RELAY_PIN 23
+#define SERIAL_RX_BUFFER_SIZE 256
 
 // ===== SENSOR OBJECTS =====
 DHT dht(DHT_PIN, DHT_TYPE);
@@ -339,52 +340,42 @@ void sendPumpStatusToESP() {
 
 void handleSocketHubMessage(String message) {
   if (message.length() == 0) return;
-
+  
+  // Trim and clean the message
+  message.trim();
+  
   socketHubConnected = true;
   lastSocketMessage = millis();
 
-  Serial.println("\n[SOCKET→MEGA] " + message);
-  Serial.println("[DEBUG] Length: " + String(message.length()));
-  Serial.println("[DEBUG] First char: '" + String(message.charAt(0)) + "'");
-
-  // ✅ FIX: Handle CMD: format properly
+  // ✅ ONLY process clean CMD format - ignore debug messages
   if (message.startsWith("CMD:")) {
     String cmdData = message.substring(4);
-    Serial.println("[DEBUG] CMD data: " + cmdData);
-
+    
     // Check if it's a garden command
     if (cmdData.indexOf("GARDEN") >= 0) {
-      Serial.println("[DEBUG] Garden command detected");
       handleGardenSocketCommand(message);
     } else {
-      // It's a door command
-      Serial.println("[DEBUG] Door command detected");
-
-      // Parse serialNumber:action format
+      // It's a door command - parse serialNumber:action format
       int colonIndex = cmdData.indexOf(':');
       if (colonIndex > 0 && colonIndex < cmdData.length() - 1) {
         String serialNumber = cmdData.substring(0, colonIndex);
         String action = cmdData.substring(colonIndex + 1);
-
-        Serial.println("[DEBUG] Parsed - Serial: " + serialNumber);
-        Serial.println("[DEBUG] Parsed - Action: " + action);
-
-        forwardCommand(serialNumber, action);
-      } else {
-        Serial.println("[DEBUG] Invalid CMD format");
+        
+        // Validate serial number format (should be 32 chars)
+        if (serialNumber.length() == 32 && serialNumber.startsWith("SERL")) {
+          forwardCommand(serialNumber, action);
+        }
       }
     }
   }
-  // Handle other message types
-  else if (message.startsWith("[EVENT] Raw data: ")) {
-    Serial.println("[DEBUG] Event message detected");
-    handleEventMessage(message);
-  } else if (message.startsWith("SERL")) {
-    Serial.println("[DEBUG] Direct command detected");
-    handleDirectCommand(message);
-  } else {
-    Serial.println("[DEBUG] Unknown message type");
-    Serial.println("[DEBUG] Message: '" + message + "'");
+  // ✅ IGNORE all debug messages that start with [
+  else if (message.startsWith("[")) {
+    // Ignore debug messages like [WS-RX], [CMD], [PARSE], etc.
+    return;
+  }
+  // ✅ IGNORE incomplete messages
+  else if (message.length() < 10) {
+    return;
   }
 }
 
@@ -489,60 +480,30 @@ void handleDoorSocketCommand(String cmdMessage) {
 
 // Update handleDoorMasterResponse to ensure proper forwarding:
 void handleDoorMasterResponse(String respMessage) {
-  Serial.println("[RESP] Processing door response");
+  // Handle potentially truncated responses
+  if (!respMessage.startsWith("RESP:")) return;
   
   String jsonData = respMessage.substring(5);
   
+  // Check if message was truncated
+  if (jsonData.length() < 10 || !jsonData.endsWith("}")) {
+    Serial.println("[RESP] Truncated response, requesting resend");
+    return;
+  }
+  
   String deviceId = extractJsonField(jsonData, "d");
-  if (deviceId == "") {
-    deviceId = extractJsonField(jsonData, "deviceId");
-  }
-  
-  String command = extractJsonField(jsonData, "c");
-  if (command == "") {
-    command = extractJsonField(jsonData, "command");
-  }
-  
   String success = extractJsonField(jsonData, "s");
-  if (success == "") {
-    success = extractJsonField(jsonData, "success");
-  }
-  
-  String result = extractJsonField(jsonData, "r");
-  if (result == "") {
-    result = extractJsonField(jsonData, "result");
-  }
-  
-  String servoAngle = extractJsonField(jsonData, "a");
-  if (servoAngle == "") {
-    servoAngle = extractJsonField(jsonData, "servo_angle");
-  }
-  
-  Serial.println("[RESP] Device: " + deviceId);
-  Serial.println("[RESP] Command: " + command);
-  Serial.println("[RESP] Success: " + success);
-  Serial.println("[RESP] Angle: " + servoAngle);
   
   int deviceIndex = findDeviceBySerial(deviceId);
   if (deviceIndex >= 0) {
     devices[deviceIndex].isOnline = true;
     devices[deviceIndex].lastSeen = millis();
-    devices[deviceIndex].status = result;
-    
-    if (servoAngle != "") {
-      devices[deviceIndex].servoAngle = servoAngle.toInt();
-      devices[deviceIndex].doorOpen = (devices[deviceIndex].servoAngle > 90);
-    }
-    
-    Serial.println("[STATE] Door " + String(deviceIndex + 1) + " updated");
+    devices[deviceIndex].status = (success == "1") ? "online" : "error";
   }
   
-  // Forward to Socket Hub
+  // Forward complete response only
   Serial1.println(respMessage);
   responsesForwarded++;
-  
-  Serial.println("[MEGA→SOCKET] " + respMessage);
-  Serial.println("[RESP] ✓ Forwarded to Socket Hub\n");
 }
 
 void handleGardenMasterMessage(String message) {
