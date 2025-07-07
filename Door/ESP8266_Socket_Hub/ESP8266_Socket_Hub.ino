@@ -136,24 +136,21 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
 }
 
 void handleWebSocketMessage(String message) {
-  Serial.println("[WS-RX] " + message);
+  // Remove debug prints that go to Serial (Mega)
   
   if (message.length() < 1) return;
   
   char type = message.charAt(0);
   
   if (type == '0') {
-    Serial.println("[EIO] OPEN");
     sendDeviceOnline();
     
   } else if (type == '2') {
     webSocket.sendTXT("3");
     lastPingResponse = millis();
-    Serial.println("[WS] PING responded with PONG");
     
   } else if (type == '3') {
     lastPingResponse = millis();
-    Serial.println("[WS] PONG received");
     
   } else if (type == '4') {
     String socketIOData = message.substring(1);
@@ -167,7 +164,6 @@ void handleSocketIOMessage(String data) {
   char type = data.charAt(0);
   
   if (type == '0') {
-    Serial.println("[SIO] CONNECT");
     sendDeviceOnline();
     
   } else if (type == '2') {
@@ -176,21 +172,17 @@ void handleSocketIOMessage(String data) {
   }
 }
 
+
 void handleSocketIOEvent(String eventData) {
-  Serial.println("[EVENT] " + eventData);
-  
   if (eventData.indexOf("command") != -1) {
-    Serial.println("[CMD] Command event received");
     parseAndExecuteOptimizedCommand(eventData);
     
   } else if (eventData.indexOf("ping") != -1) {
     String pongPayload = "42[\"pong\",{\"timestamp\":" + String(millis()) + ",\"hub_serial\":\"" + HUB_SERIAL + "\",\"optimized\":true}]";
     webSocket.sendTXT(pongPayload);
-    Serial.println("[PING] Pong sent");
     lastPingResponse = millis();
     
   } else if (eventData.indexOf("door_command") != -1) {
-    Serial.println("[DOOR] Door command received");
     extractOptimizedAction(eventData);
   }
 }
@@ -220,27 +212,18 @@ void extractOptimizedAction(String eventData) {
   }
 }
 
+
+// Replace your parseAndExecuteOptimizedCommand function with this:
+
 void parseAndExecuteOptimizedCommand(String eventData) {
-  Serial.println("[PARSE] Starting parse...");
-  
   int startIdx = eventData.indexOf("{");
   int endIdx = eventData.lastIndexOf("}");
   
-  if (startIdx == -1 || endIdx == -1) {
-    Serial.println("[PARSE] No JSON found");
-    return;
-  }
+  if (startIdx == -1 || endIdx == -1) return;
   
   String jsonString = eventData.substring(startIdx, endIdx + 1);
-  Serial.println("[PARSE] JSON: " + jsonString);
-  
   JsonDocument doc;
-  DeserializationError error = deserializeJson(doc, jsonString);
-  
-  if (error) {
-    Serial.println("[PARSE] JSON Error: " + String(error.c_str()));
-    return;
-  }
+  if (deserializeJson(doc, jsonString) != DeserializationError::Ok) return;
   
   String targetSerial = "";
   if (doc["serialNumber"].is<String>()) {
@@ -248,46 +231,14 @@ void parseAndExecuteOptimizedCommand(String eventData) {
   }
   
   String action = "";
-  
-  if (doc["esp01_safe"].is<bool>() && doc["esp01_safe"] == true) {
-    Serial.println("[PARSE] ESP01 Safe mode");
-    
-    action = "toggle_door";
-    
-    if (millis() - lastCommand.timestamp < 3000 && lastCommand.action != "") {
-      action = lastCommand.action;
-      Serial.println("[PARSE] Using stored action: " + action);
-    }
-    
-    if (doc["action"].is<String>()) {
-      action = doc["action"].as<String>();
-    }
-    
-  } else {
-    if (doc["action"].is<String>()) {
-      action = doc["action"].as<String>();
-    }
+  if (doc["action"].is<String>()) {
+    action = doc["action"].as<String>();
   }
   
-  if (targetSerial == "" && lastCommand.targetSerial != "" && millis() - lastCommand.timestamp < 3000) {
-    targetSerial = lastCommand.targetSerial;
-    Serial.println("[PARSE] Using stored target: " + targetSerial);
-  }
+  if (targetSerial == "" || action == "") return;
   
-  if (targetSerial == "") {
-    Serial.println("[PARSE] No target serial");
-    return;
-  }
-  
-  if (action == "") {
-    action = "toggle_door";
-    Serial.println("[PARSE] Using default action");
-  }
-  
-  Serial.println("[PARSE] Final: " + targetSerial + " -> " + action);
-  
-  String megaCommand = "CMD:" + targetSerial + ":" + action;
-  Serial.println("[MEGA-TX] " + megaCommand);
+  // ✅ Send ONLY clean command to Mega
+  Serial.println("CMD:" + targetSerial + ":" + action);
 }
 
 void sendDeviceOnline() {
