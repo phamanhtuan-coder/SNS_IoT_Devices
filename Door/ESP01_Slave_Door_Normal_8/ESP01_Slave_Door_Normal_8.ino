@@ -11,7 +11,7 @@ uint8_t gatewayMAC[6] = {0x48, 0x3F, 0xDA, 0x1F, 0x4A, 0xA6};
 String DEVICE_SERIAL = "SERL27JUN2501JYR2RKVTH6PWR9ETXC2";
 
 // ESP-01 PIN CONFIGURATION
-#define SIGNAL_PIN 9  // GPIO2 - sends to UNO Receive
+#define SIGNAL_PIN 2 // GPIO2 - sends to UNO Receive
 
 // ESP-NOW message structure
 struct CompactMessage {
