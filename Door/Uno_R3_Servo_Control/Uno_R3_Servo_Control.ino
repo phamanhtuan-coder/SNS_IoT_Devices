@@ -31,25 +31,48 @@ void loop() {
 
 void controlServo(int servoNum) {
   if (servoNum >= 1 && servoNum <= 7) {
-    int index = servoNum - 1;  // Convert to 0-based index
     
-    // Determine target state based on current state
-    int targetState = (doorStates[index] == 0) ? 1 : 0;  // 0->1 or 1->0
-    
-    // Only move if state actually changes
-    if (doorStates[index] != targetState) {
-      doorStates[index] = targetState;
+    // Door 7 controls TWO servos (dual wing door)
+    if (servoNum == 7) {
+      // Control servos 6 and 7 together (pins 7 and 8)
+      int index1 = 5;  // Servo 6 (pin 7)
+      int index2 = 6;  // Servo 7 (pin 8)
       
-      // Move servo
-      int targetAngle = (targetState == 1) ? 180 : 0;
-      servos[index].write(targetAngle);
+      // Toggle both door states together
+      int targetState = (doorStates[index1] == 0) ? 1 : 0;
       
-      // Status feedback
-      Serial.println("Servo " + String(servoNum) + 
-                     " (Pin " + String(2 + index) + ") -> " +
-                     (targetState == 1 ? "OPEN (180°)" : "CLOSED (0°)"));
-    } else {
-      Serial.println("Servo " + String(servoNum) + " already in target state");
+      if (doorStates[index1] != targetState || doorStates[index2] != targetState) {
+        doorStates[index1] = targetState;
+        doorStates[index2] = targetState;
+        
+        // Move both servos
+        int targetAngle = (targetState == 1) ? 180 : 0;
+        servos[index1].write(targetAngle);
+        servos[index2].write(targetAngle);
+        
+        Serial.println("Door 7 DUAL SERVO - Pins 7&8 -> " +
+                       String(targetState == 1 ? "OPEN (180°)" : "CLOSED (0°)"));
+      } else {
+        Serial.println("Door 7 already in target state");
+      }
+    } 
+    // Single servo doors (1-6)
+    else {
+      int index = servoNum - 1;
+      int targetState = (doorStates[index] == 0) ? 1 : 0;
+      
+      if (doorStates[index] != targetState) {
+        doorStates[index] = targetState;
+        
+        int targetAngle = (targetState == 1) ? 180 : 0;
+        servos[index].write(targetAngle);
+        
+        Serial.println("Servo " + String(servoNum) + 
+                       " (Pin " + String(2 + index) + ") -> " +
+                       (targetState == 1 ? "OPEN (180°)" : "CLOSED (0°)"));
+      } else {
+        Serial.println("Servo " + String(servoNum) + " already in target state");
+      }
     }
   } else {
     Serial.println("Invalid servo number: " + String(servoNum));
