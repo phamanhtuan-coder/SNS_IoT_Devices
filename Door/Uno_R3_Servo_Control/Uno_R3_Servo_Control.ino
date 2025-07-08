@@ -9,11 +9,18 @@ void setup() {
   // Attach servos to pins 2-8 (for doors 1-7)
   for (int i = 0; i < 7; i++) {
     servos[i].attach(2 + i);
-    servos[i].write(0);        // Start at closed position
     doorStates[i] = 0;         // Start closed
   }
   
   Serial.println("UNO Control Ready - 7 Servos on pins 2-8");
+  
+  // ✅ FORCE RESET - Ensure all servos start at CLOSED position
+  Serial.println("FORCE RESET: Moving all servos to CLOSED (0°)");
+  for (int i = 0; i < 7; i++) {
+    servos[i].write(0);
+    delay(100);  // Small delay between servo movements
+  }
+  Serial.println("RESET COMPLETE: All doors CLOSED");
 }
 
 void loop() {

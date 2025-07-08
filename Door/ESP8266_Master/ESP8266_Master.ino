@@ -36,7 +36,7 @@ DoorConfig doors[10] = {
   {"SERL27JUN2501JYR2RKVTXNCK1GB3HBZ", {0x84, 0x0d, 0x8e, 0xa4, 0x3a, 0xd2}, 6, "SERVO", false, 0, 0, "CLD"},
   {"SERL27JUN2501JYR2RKVS2P6XBVF1P2E", {0x84, 0x0d, 0x8e, 0xa4, 0x3b, 0x29}, 7, "SERVO", false, 0, 0, "CLD"},
   // Door ID 8: ESP-01 servo door (missing MAC - to be updated)
-  {"SERL27JUN2501JYR2RKVTH6PWR9ETXC2", {0x3c, 0x71, 0xbf, 0x39, 0x35, 0x47}, 8, "SERVO", false, 0, 0, "CLD"},  3c:71:bf:39:35:47
+  {"SERL27JUN2501JYR2RKVTH6PWR9ETXC2", {0x3c, 0x71, 0xbf, 0x39, 0x35, 0x47}, 8, "SERVO", false, 0, 0, "CLD"},  
   // Door ID 9: ESP32 rolling door
   {"SERL27JUN2501JYR2RKVVSBGRTM0TRFW", {0xb0, 0xb2, 0x1c, 0x97, 0xc6, 0xd0}, 9, "ROLLING", false, 0, 0, "CLD"},
   // Door ID 10: Sliding door (placeholder - to be configured)
@@ -325,9 +325,9 @@ void checkDoorStatus() {
     }
   }
 }
-
+// ✅ FIXED: Only heartbeat active doors with valid MAC addresses
 void loop() {
-  // ✅ OPTIMIZED: Handle MEGA commands with compact parsing
+  // Handle MEGA commands
   if (Serial.available()) {
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
@@ -346,13 +346,16 @@ void loop() {
     }
   }
   
-  // ✅ OPTIMIZED: Faster heartbeat cycle for all 9 doors
+  // ✅ FIXED: Heartbeat only doors with valid MAC addresses
   static unsigned long lastHeartbeat = 0;
   static int heartbeatIndex = 0;
+  // Only active door indices: 0,1,2,3,4,5,6,7,8 (skip door 9 - no MAC)
+  static int activeDoorIndices[] = {0, 1, 2, 3, 4, 5, 6, 7, 8};
+  static int numActiveDoors = 9;
   
-  if (millis() - lastHeartbeat > 6500) {  // Every 6.5 seconds
-    sendHeartbeatToDoor(heartbeatIndex);
-    heartbeatIndex = (heartbeatIndex + 1) % TOTAL_DOORS;
+  if (millis() - lastHeartbeat > 8000) {  // Every 8 seconds
+    sendHeartbeatToDoor(activeDoorIndices[heartbeatIndex]);
+    heartbeatIndex = (heartbeatIndex + 1) % numActiveDoors;
     lastHeartbeat = millis();
   }
   
@@ -362,23 +365,14 @@ void loop() {
     lastStatusCheck = millis();
   }
   
-  // Status print with door type breakdown
+  // Status print
   static unsigned long lastStatus = 0;
   if (millis() - lastStatus > 60000) {
     int onlineCount = 0;
-    int servoOnline = 0;
-    int rollingOnline = 0;
-    
-    for (int i = 0; i < TOTAL_DOORS; i++) {
-      if (doors[i].isOnline) {
-        onlineCount++;
-        if (doors[i].doorType == "SERVO") servoOnline++;
-        else if (doors[i].doorType == "ROLLING") rollingOnline++;
-      }
+    for (int i = 0; i < 10; i++) {
+      if (doors[i].isOnline) onlineCount++;
     }
-    
-    Serial.println("STATUS Online:" + String(onlineCount) + "/" + String(TOTAL_DOORS) + 
-                   " (Servo:" + String(servoOnline) + "/7, Rolling:" + String(rollingOnline) + "/2)" +
+    Serial.println("STATUS Online:" + String(onlineCount) + "/9 active doors" +
                    " Heap:" + String(ESP.getFreeHeap()));
     lastStatus = millis();
   }

@@ -105,35 +105,23 @@ struct DeviceState {
 };
 
 DeviceState devices[10] = {
-  { "SERL27JUN2501JYR2RKVVX08V40YMGTW", "", false, 0, false, 0, "offline" },
-  { "SERL27JUN2501JYR2RKVR0SC7SJ8P8DD", "", false, 0, false, 0, "offline" },
-  { "SERL27JUN2501JYR2RKVRNHS46VR6AS1", "", false, 0, false, 0, "offline" },
-  { "SERL27JUN2501JYR2RKVSE2RW7KQ4KMP", "", false, 0, false, 0, "offline" },
-  { "SERL27JUN2501JYR2RKVTBZ40JPF88WP", "", false, 0, false, 0, "offline" },
-  { "SERL27JUN2501JYR2RKVTXNCK1GB3HBZ", "", false, 0, false, 0, "offline" },
-  { "SERL27JUN2501JYR2RKVS2P6XBVF1P2E", "", false, 0, false, 0, "offline" }
-};
-
-const int TOTAL_DEVICES = 10;
-
-DoorConfig doors[10] = {
   // Original 7 ESP-01 servo doors
   {"SERL27JUN2501JYR2RKVVX08V40YMGTW", "", false, 0, false, 0, "offline" },
-  {"SERL27JUN2501JYR2RKVR0SC7SJ8P8DD","", false, 0, false, 0, "offline" },
+  {"SERL27JUN2501JYR2RKVR0SC7SJ8P8DD", "", false, 0, false, 0, "offline" },
   {"SERL27JUN2501JYR2RKVRNHS46VR6AS1", "", false, 0, false, 0, "offline" },
-  {"SERL27JUN2501JYR2RKVSE2RW7KQ4KMP","", false, 0, false, 0, "offline" },
+  {"SERL27JUN2501JYR2RKVSE2RW7KQ4KMP", "", false, 0, false, 0, "offline" },
   {"SERL27JUN2501JYR2RKVTBZ40JPF88WP", "", false, 0, false, 0, "offline" },
   {"SERL27JUN2501JYR2RKVTXNCK1GB3HBZ", "", false, 0, false, 0, "offline" },
-  {"SERL27JUN2501JYR2RKVS2P6XBVF1P2E","", false, 0, false, 0, "offline" },
+  {"SERL27JUN2501JYR2RKVS2P6XBVF1P2E", "", false, 0, false, 0, "offline" },
   // Door ID 8: ESP-01 servo door (missing MAC - to be updated)
   {"SERL27JUN2501JYR2RKVTH6PWR9ETXC2", "", false, 0, false, 0, "offline" },
   // Door ID 9: ESP32 rolling door
-  {"SERL27JUN2501JYR2RKVVSBGRTM0TRFW","", false, 0, false, 0, "offline" },
+  {"SERL27JUN2501JYR2RKVVSBGRTM0TRFW", "", false, 0, false, 0, "offline" },
   // Door ID 10: Sliding door (placeholder - to be configured)
-  {"", {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},"", false, 0, false, 0, "offline" },
+  {"", "", false, 0, false, 0, "offline" }
 };
-const int TOTAL_DOORS = 10;  // Only count active doors (1-7 + 9), skip 8 and 10 for now
 
+const int TOTAL_DEVICES = 9;  // Only count active doors (1-7 + 8 + 9), skip 10 for now
 
 // ===== SYSTEM STATUS =====
 bool socketHubConnected = false;
@@ -341,7 +329,11 @@ void initializeDevices() {
     devices[i].lastSeen = 0;
     devices[i].status = "offline";
 
-    Serial.println("Door " + String(i + 1) + ": " + devices[i].serialNumber);
+    if (devices[i].serialNumber.length() > 0) {
+      Serial.println("Door " + String(i + 1) + ": " + devices[i].serialNumber);
+    } else {
+      Serial.println("Door " + String(i + 1) + ": [Not configured]");
+    }
   }
 
   Serial.println("[INIT] ✓ " + String(TOTAL_DEVICES) + " doors initialized");
@@ -1064,7 +1056,11 @@ void printSystemStatus() {
   int onlineCount = 0;
   for (int i = 0; i < TOTAL_DEVICES; i++) {
     if (devices[i].isOnline) onlineCount++;
-    Serial.println("Door " + String(i + 1) + ": " + String(devices[i].isOnline ? "ONLINE" : "OFFLINE") + " | " + String(devices[i].doorOpen ? "OPEN" : "CLOSED") + " | " + String(devices[i].servoAngle) + "° | " + devices[i].status);
+    if (devices[i].serialNumber.length() > 0) {
+      Serial.println("Door " + String(i + 1) + ": " + String(devices[i].isOnline ? "ONLINE" : "OFFLINE") + " | " + String(devices[i].doorOpen ? "OPEN" : "CLOSED") + " | " + String(devices[i].servoAngle) + "° | " + devices[i].status);
+    } else {
+      Serial.println("Door " + String(i + 1) + ": [Not configured]");
+    }
   }
 
   Serial.println("\nOnline Doors: " + String(onlineCount) + "/" + String(TOTAL_DEVICES));
