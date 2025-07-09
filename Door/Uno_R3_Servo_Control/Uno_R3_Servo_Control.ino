@@ -1,87 +1,78 @@
 #include <Servo.h>
 
-Servo servos[7];
-int doorStates[7] = {0};  // 0=closed, 1=open
+// --- Config ---
+#define DOOR_COUNT 8
+#define SERVO_ANGLE_CLOSED 0
+#define SERVO_ANGLE_OPEN   90  // Hoặc 180, tuỳ thực tế servo của bạn
+
+// Mapping các servo PWM theo từng cửa
+// Giả sử:
+// - D1–D6, D8: 1 servo mỗi cửa
+// - D7: 2 servo (servo7A - pin 8, servo7B - pin 10)
+const int servoPins[DOOR_COUNT + 1] = {
+  2,  // Door 1
+  3,  // Door 2
+  4,  // Door 3
+  5,  // Door 4
+  6,  // Door 5
+  7,  // Door 6
+  8,  // Door 7A
+  9,  // Door 8
+  10  // Door 7B (cửa đôi)
+};
+
+Servo servos[DOOR_COUNT + 1];
 
 void setup() {
   Serial.begin(115200);
-  
-  // Attach servos to pins 2-8 (for doors 1-7)
-  for (int i = 0; i < 7; i++) {
-    servos[i].attach(2 + i);
-    doorStates[i] = 0;         // Start closed
+  for (int i = 0; i < DOOR_COUNT + 1; i++) {
+    servos[i].attach(servoPins[i]);
+    servos[i].write(SERVO_ANGLE_CLOSED);
   }
-  
-  Serial.println("UNO Control Ready - 7 Servos on pins 2-8");
-  
-  // ✅ FORCE RESET - Ensure all servos start at CLOSED position
-  Serial.println("FORCE RESET: Moving all servos to CLOSED (0°)");
-  for (int i = 0; i < 7; i++) {
-    servos[i].write(0);
-    delay(100);  // Small delay between servo movements
-  }
-  Serial.println("RESET COMPLETE: All doors CLOSED");
+  Serial.println("UNO_SERVO:READY");
 }
 
 void loop() {
-  // Listen for serial commands from UNO Receive
-  if (Serial.available()) {
-    String cmd = Serial.readStringUntil('\n');
-    cmd.trim();
-    
-    if (cmd.startsWith("SERVO")) {
-      int servoNum = cmd.substring(5).toInt();
-      controlServo(servoNum);
+  // Đọc từng dòng lệnh từ Serial
+  static String inputString = "";
+  while (Serial.available()) {
+    char inChar = (char)Serial.read();
+    if (inChar == '\n' || inChar == '\r') {
+      if (inputString.length() > 0) {
+        handleCommand(inputString);
+        inputString = "";
+      }
+    } else {
+      inputString += inChar;
     }
   }
 }
 
-void controlServo(int servoNum) {
-  if (servoNum >= 1 && servoNum <= 7) {
-    
-    // Door 7 controls TWO servos (dual wing door)
-    if (servoNum == 7) {
-      // Control servos 6 and 7 together (pins 7 and 8)
-      int index1 = 5;  // Servo 6 (pin 7)
-      int index2 = 6;  // Servo 7 (pin 8)
-      
-      // Toggle both door states together
-      int targetState = (doorStates[index1] == 0) ? 1 : 0;
-      
-      if (doorStates[index1] != targetState || doorStates[index2] != targetState) {
-        doorStates[index1] = targetState;
-        doorStates[index2] = targetState;
-        
-        // Move both servos
-        int targetAngle = (targetState == 1) ? 180 : 0;
-        servos[index1].write(targetAngle);
-        servos[index2].write(targetAngle);
-        
-        Serial.println("Door 7 DUAL SERVO - Pins 7&8 -> " +
-                       String(targetState == 1 ? "OPEN (180°)" : "CLOSED (0°)"));
+void handleCommand(String cmd) {
+  cmd.trim(); // Xoá khoảng trắng thừa
+  // Ví dụ: DOOR7:OPEN
+  if (cmd.startsWith("DOOR") && (cmd.indexOf(':') != -1)) {
+    int colonIdx = cmd.indexOf(':');
+    int doorNum = cmd.substring(4, colonIdx).toInt();
+    String action = cmd.substring(colonIdx + 1);
+
+    if (doorNum >= 1 && doorNum <= DOOR_COUNT) {
+      if (doorNum == 7) {
+        // Cửa đôi: Quay cả 2 servo (servo7A: index 6, servo7B: index 8)
+        int angle = (action == "OPEN") ? SERVO_ANGLE_OPEN : SERVO_ANGLE_CLOSED;
+        servos[6].write(angle);  // servo7A (pin 8)
+        servos[8].write(angle);  // servo7B (pin 10)
+        Serial.print("DOOR7:");
+        Serial.println(action);
       } else {
-        Serial.println("Door 7 already in target state");
-      }
-    } 
-    // Single servo doors (1-6)
-    else {
-      int index = servoNum - 1;
-      int targetState = (doorStates[index] == 0) ? 1 : 0;
-      
-      if (doorStates[index] != targetState) {
-        doorStates[index] = targetState;
-        
-        int targetAngle = (targetState == 1) ? 180 : 0;
-        servos[index].write(targetAngle);
-        
-        Serial.println("Servo " + String(servoNum) + 
-                       " (Pin " + String(2 + index) + ") -> " +
-                       (targetState == 1 ? "OPEN (180°)" : "CLOSED (0°)"));
-      } else {
-        Serial.println("Servo " + String(servoNum) + " already in target state");
+        int servoIndex = (doorNum > 7) ? doorNum : (doorNum - 1);
+        int angle = (action == "OPEN") ? SERVO_ANGLE_OPEN : SERVO_ANGLE_CLOSED;
+        servos[servoIndex].write(angle);
+        Serial.print("DOOR");
+        Serial.print(doorNum);
+        Serial.print(":");
+        Serial.println(action);
       }
     }
-  } else {
-    Serial.println("Invalid servo number: " + String(servoNum));
   }
 }
