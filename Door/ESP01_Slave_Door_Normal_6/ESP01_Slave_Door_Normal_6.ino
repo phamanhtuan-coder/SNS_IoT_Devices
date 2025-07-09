@@ -1,276 +1,143 @@
-#define DEVICE_ID 6
-#define FIRMWARE_VERSION "4.0.0"
-
 #include <ESP8266WiFi.h>
 #include <espnow.h>
-#include <Ticker.h>
 
+// ===== DOOR CONFIGURATION =====
+#define DOOR_ID 6         // Door 1
+#define OUTPUT_PIN 2      // Always use GPIO2 for output signal to UNO
 
-// GATEWAY MAC ADDRESS
-uint8_t gatewayMAC[6] = {0x48, 0x3F, 0xDA, 0x1F, 0x4A, 0xA6};
-String DEVICE_SERIAL = "SERL27JUN2501JYR2RKVTXNCK1GB3HBZ";
+// Serial number must match the one in ESP8266_Master.ino
+const char* SERIAL_NUMBER = "SERL27JUN2501JYR2RKVTXNCK1GB3HBZ"; // Door 1
 
-// ESP-01 PIN CONFIGURATION
-#define SIGNAL_PIN 7  // GPIO2 - sends to UNO Receive
-
-// ESP-NOW message structure
+// ===== COMPACT MESSAGE STRUCTURE =====
 struct CompactMessage {
-  char type[4];        // "CMD", "ACK", "HBT" (3 chars + null)
-  char action[4];      // "OPN", "CLS", "TGL" (3 chars + null)  
-  int angle;           // Current servo angle
-  bool success;        // Command success
+  char type[4];        // "CMD", "ACK", "HBT", "STS"
+  char action[4];      // "OPN", "CLS", "TGL", "ALV", etc.
+  int angle;           // Servo angle
+  bool success;        // Success flag
   unsigned long ts;    // Timestamp
 };
 
-// Door state enum
-enum DoorState { 
-  DOOR_CLOSED = 0, 
-  DOOR_OPENING = 1, 
-  DOOR_OPEN = 2, 
-  DOOR_CLOSING = 3 
-};
-
-DoorState doorState = DOOR_CLOSED;
-bool isMoving = false;
-
-// Prevent callback-to-callback sending
-volatile bool needSendHeartbeat = false;
-volatile bool needSendResponse = false;
-volatile bool needSendStatus = false;
-
-// Response data for main loop
-char pendingAction[4] = "";
-bool pendingSuccess = false;
-
-// CONNECTION STATUS
-bool gatewayOnline = false;
-unsigned long lastGatewayMsg = 0;
+// ===== DOOR STATE =====
+bool doorOpen = false;
+int servoAngle = 0;
+unsigned long lastCommand = 0;
 unsigned long lastHeartbeat = 0;
+bool commandPending = false;
 
-// MEMORY PROTECTION
-static CompactMessage rxBuffer;
-static CompactMessage txBuffer;
-
-// COUNTERS
-unsigned long msgSent = 0;
-unsigned long msgReceived = 0;
-
+// ===== SETUP FUNCTION =====
 void setup() {
   Serial.begin(115200);
-  delay(2000);
+  delay(500);
   
-  Serial.println("ESP-01 Door v4.0.0 (UNO Signal)");
-  Serial.println("ID:" + String(DEVICE_ID));
-  Serial.println("Serial:" + DEVICE_SERIAL);
+  // Initialize pin as output
+  pinMode(OUTPUT_PIN, OUTPUT);
+  digitalWrite(OUTPUT_PIN, LOW); // Start with door closed
   
-  // Initialize signal pin
-  pinMode(SIGNAL_PIN, OUTPUT);
-  digitalWrite(SIGNAL_PIN, LOW);
-  
-  doorState = DOOR_CLOSED;
-  
-  // Setup ESP-NOW
-  setupESPNow();
-  
-  Serial.println("Ready - Pin " + String(SIGNAL_PIN) + " to UNO");
-  delay(1000);
-  needSendHeartbeat = true;
-}
-
-void setupESPNow() {
+  // Initialize ESP-NOW
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
-  delay(50);
-  
-  wifi_set_channel(1);
-  wifi_set_sleep_type(NONE_SLEEP_T);
   
   if (esp_now_init() != 0) {
-    Serial.println("ESP-NOW Init FAIL");
+    Serial.println("ESP-NOW init failed");
     delay(3000);
     ESP.restart();
   }
   
   esp_now_set_self_role(ESP_NOW_ROLE_COMBO);
-  esp_now_register_send_cb(onDataSent);
   esp_now_register_recv_cb(onDataReceived);
   
-  if (esp_now_add_peer(gatewayMAC, ESP_NOW_ROLE_COMBO, 1, NULL, 0) == 0) {
-    Serial.println("Peer OK");
-  } else {
-    Serial.println("Peer FAIL");
+  Serial.println("ESP-01 Door " + String(DOOR_ID) + " Ready");
+  Serial.println("Serial: " + String(SERIAL_NUMBER));
+  Serial.println("Using GPIO" + String(OUTPUT_PIN) + " for output signal");
+}
+
+// ===== ESP-NOW DATA RECEIVED CALLBACK =====
+void onDataReceived(uint8_t *mac, uint8_t *data, uint8_t len) {
+  if (len != sizeof(CompactMessage)) return;
+  
+  CompactMessage msg;
+  memcpy(&msg, data, len);
+  
+  String msgType = String(msg.type);
+  String action = String(msg.action);
+  
+  // Process command
+  if (msgType == "CMD") {
+    handleCommand(action);
+  }
+  // Process heartbeat
+  else if (msgType == "HBT") {
+    lastHeartbeat = millis();
+    sendAckMessage("ALV", true);
   }
 }
 
-void onDataSent(uint8_t *mac_addr, uint8_t sendStatus) {
-  msgSent++;
-  Serial.println("TX#" + String(msgSent) + (sendStatus == 0 ? " OK" : " FAIL"));
-}
-
-void onDataReceived(uint8_t *mac_addr, uint8_t *data, uint8_t len) {
-  msgReceived++;
+// ===== HANDLE COMMAND =====
+void handleCommand(String action) {
+  lastCommand = millis();
   
-  if (memcmp(mac_addr, gatewayMAC, 6) != 0 || len != sizeof(CompactMessage)) {
-    Serial.println("RX#" + String(msgReceived) + " BAD");
-    return;
+  // Toggle door state
+  if (action == "TGL") {
+    doorOpen = !doorOpen;
+    servoAngle = doorOpen ? 180 : 0;
+    
+    // Set output pin HIGH for open, LOW for closed
+    digitalWrite(OUTPUT_PIN, doorOpen ? HIGH : LOW);
+    
+    // Send acknowledgment
+    sendAckMessage(doorOpen ? "OPN" : "CLS", true);
+    
+    Serial.println("Door " + String(DOOR_ID) + " toggled to " + 
+                  (doorOpen ? "OPEN" : "CLOSED") + 
+                  " - Signal: " + String(doorOpen ? "HIGH" : "LOW"));
   }
-  
-  memcpy(&rxBuffer, data, len);
-  
-  gatewayOnline = true;
-  lastGatewayMsg = millis();
-  
-  String type = String(rxBuffer.type);
-  Serial.println("RX#" + String(msgReceived) + ":" + type);
-  
-  if (type == "CMD") {
-    strncpy(pendingAction, rxBuffer.action, 3);
-    pendingAction[3] = '\0';
-    needSendResponse = true;
-    
-  } else if (type == "HBT") {
-    needSendHeartbeat = true;
-  }
-}
-
-void processCommand() {
-  if (!needSendResponse) return;
-  needSendResponse = false;
-  
-  String action = String(pendingAction);
-  
-  if (action == "OPN" || action == "CLS" || action == "TGL") {
-    // Send device ID as pulse count to UNO
-    sendPulsesToUNO(DEVICE_ID);
-    
-    // Update door state
-    if (action == "OPN") {
-      doorState = DOOR_OPEN;
-    } else if (action == "CLS") {
-      doorState = DOOR_CLOSED;
-    } else if (action == "TGL") {
-      doorState = (doorState == DOOR_CLOSED) ? DOOR_OPEN : DOOR_CLOSED;
-    }
-    
-    pendingSuccess = true;
-    Serial.println("Command: " + action + " -> " + String(DEVICE_ID) + " pulses");
-    needSendStatus = true;
-  }
-  
-  sendResponse();
-}
-
-void sendPulsesToUNO(int pulseCount) {
-  Serial.println("Sending " + String(pulseCount) + " pulses to UNO");
-  
-  // Ensure pin starts HIGH
-  digitalWrite(SIGNAL_PIN, HIGH);
-  delay(100);
-  
-  // Send pulse train - each pulse is 250ms LOW, 100ms HIGH
-  for (int i = 0; i < pulseCount; i++) {
-    digitalWrite(SIGNAL_PIN, LOW);   // Pull pin LOW (active)
-    delay(250);
-    digitalWrite(SIGNAL_PIN, HIGH);  // Release pin HIGH (inactive)
-    
-    // Delay between pulses (except last)
-    if (i < pulseCount - 1) {
-      delay(100);
+  // Open door
+  else if (action == "OPN") {
+    if (!doorOpen) {
+      doorOpen = true;
+      servoAngle = 180;
+      digitalWrite(OUTPUT_PIN, HIGH);
+      sendAckMessage("OPN", true);
+      
+      Serial.println("Door " + String(DOOR_ID) + " opened - Signal: HIGH");
+    } else {
+      sendAckMessage("OPN", true); // Already open
+      Serial.println("Door " + String(DOOR_ID) + " already open");
     }
   }
-  
-  // Ensure pin stays HIGH after transmission
-  digitalWrite(SIGNAL_PIN, HIGH);
-  Serial.println("Pulses sent successfully");
-}
-
-void sendResponse() {
-  memset(&txBuffer, 0, sizeof(txBuffer));
-  
-  strncpy(txBuffer.type, "ACK", 3);
-  strncpy(txBuffer.action, pendingAction, 3);
-  txBuffer.angle = (doorState == DOOR_OPEN) ? 180 : 0;  // Simulated angle
-  txBuffer.success = pendingSuccess;
-  txBuffer.ts = millis();
-  
-  int result = esp_now_send(gatewayMAC, (uint8_t*)&txBuffer, sizeof(txBuffer));
-  Serial.println("ACK:" + String(pendingAction) + "=" + String(pendingSuccess) + "(" + String(result) + ")");
-}
-
-void sendHeartbeat() {
-  if (!needSendHeartbeat) return;
-  needSendHeartbeat = false;
-  
-  memset(&txBuffer, 0, sizeof(txBuffer));
-  
-  strncpy(txBuffer.type, "HBT", 3);
-  strncpy(txBuffer.action, "ALV", 3);
-  txBuffer.angle = (doorState == DOOR_OPEN) ? 180 : 0;
-  txBuffer.success = true;
-  txBuffer.ts = millis();
-  
-  int result = esp_now_send(gatewayMAC, (uint8_t*)&txBuffer, sizeof(txBuffer));
-  Serial.println("HBT:" + String(result == 0 ? "OK" : "FAIL"));
-  
-  lastHeartbeat = millis();
-}
-
-void sendStatus() {
-  if (!needSendStatus) return;
-  needSendStatus = false;
-  
-  memset(&txBuffer, 0, sizeof(txBuffer));
-  
-  strncpy(txBuffer.type, "STS", 3);
-  
-  // State as 3-char codes
-  if (doorState == DOOR_CLOSED) strncpy(txBuffer.action, "CLD", 3);
-  else if (doorState == DOOR_OPENING) strncpy(txBuffer.action, "OPG", 3);
-  else if (doorState == DOOR_OPEN) strncpy(txBuffer.action, "OPD", 3);
-  else strncpy(txBuffer.action, "CLG", 3);
-  
-  txBuffer.angle = (doorState == DOOR_OPEN) ? 180 : 0;
-  txBuffer.success = true;
-  txBuffer.ts = millis();
-  
-  int result = esp_now_send(gatewayMAC, (uint8_t*)&txBuffer, sizeof(txBuffer));
-  Serial.println("STS:" + String(txBuffer.action) + "(" + String(result) + ")");
-}
-
-void checkConnection() {
-  if (gatewayOnline && (millis() - lastGatewayMsg > 120000)) {
-    gatewayOnline = false;
-    Serial.println("GW Timeout");
+  // Close door
+  else if (action == "CLS") {
+    if (doorOpen) {
+      doorOpen = false;
+      servoAngle = 0;
+      digitalWrite(OUTPUT_PIN, LOW);
+      sendAckMessage("CLS", true);
+      
+      Serial.println("Door " + String(DOOR_ID) + " closed - Signal: LOW");
+    } else {
+      sendAckMessage("CLS", true); // Already closed
+      Serial.println("Door " + String(DOOR_ID) + " already closed");
+    }
   }
 }
 
+// ===== SEND ACKNOWLEDGMENT MESSAGE =====
+void sendAckMessage(String action, bool success) {
+  CompactMessage msg;
+  
+  strcpy(msg.type, "ACK");
+  strcpy(msg.action, action.c_str());
+  msg.angle = servoAngle;
+  msg.success = success;
+  msg.ts = millis();
+  
+  // We don't send this directly - ESP-NOW Master will request status periodically
+  commandPending = true;
+}
+
+// ===== MAIN LOOP =====
 void loop() {
-  // Process commands and send responses
-  processCommand();
-  sendHeartbeat();
-  sendStatus();
-  
-  // Heartbeat timer
-  if (millis() - lastHeartbeat > 30000) {
-    needSendHeartbeat = true;
-  }
-  
-  // Connection check
-  static unsigned long lastCheck = 0;
-  if (millis() - lastCheck > 10000) {
-    checkConnection();
-    lastCheck = millis();
-  }
-  
-  // Status print
-  static unsigned long lastPrint = 0;
-  if (millis() - lastPrint > 45000) {
-    Serial.println("GW:" + String(gatewayOnline ? "ON" : "OFF") + 
-                   " Door:" + String(doorState) + 
-                   " TX/RX:" + String(msgSent) + "/" + String(msgReceived));
-    lastPrint = millis();
-  }
-  
+  // Very simple loop - ESP-01 just maintains state and output signal
   yield();
   delay(10);
 }
