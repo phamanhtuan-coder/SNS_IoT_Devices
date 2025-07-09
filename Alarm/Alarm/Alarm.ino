@@ -1,8 +1,7 @@
 /**************************************************************
- * ESP8266 Fire Alarm - Enhanced with Full Alarm Commands
+ * ESP8266 Fire Alarm - UDP WiFi + SSL Railway Connection
  * 
- * Version: v15.0 - Complete Alarm System
- * Features: Full alarm command support + Enhanced capabilities
+ * Version: v16.0 - UDP Config + SSL Support
  **************************************************************/
 
 #define SERIAL_NUMBER "SERL12JUN2501JXHMC17J1RPRY7P063E"
@@ -12,29 +11,37 @@
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
 #include <Adafruit_AHTX0.h>
+#include <WiFiUdp.h>
+#include <EEPROM.h>
 
-// WiFi credentials
-const char* WIFI_SSID = "Anh Tuan";
-const char* WIFI_PASSWORD = "21032001";
+// Hotspot configuration
+const char* HOTSPOT_SSID = "ESP8266-Alarm-Config";
+const char* HOTSPOT_PASSWORD = "alarmconfig123";
 
-// Server configuration
-String WEBSOCKET_HOST = "192.168.51.115";
-uint16_t WEBSOCKET_PORT = 7777;
-String WEBSOCKET_PATH = "/socket.io/?EIO=3&transport=websocket&serialNumber=" + String(SERIAL_NUMBER) + "&isIoTDevice=true";
+// Server configuration (Railway SSL)
+const char* WEBSOCKET_HOST = "iothomeconnectapiv2-production.up.railway.app";
+const uint16_t WEBSOCKET_PORT = 443;
+const char* WEBSOCKET_PATH_TEMPLATE = "/socket.io/?EIO=3&transport=websocket&serialNumber=%s&isIoTDevice=true";
 
 // Hardware
 WebSocketsClient webSocket;
 Adafruit_AHTX0 aht;
+WiFiUDP udp;
 
 #define MQ2_PIN A0
 #define BUZZER_PIN_N D8
 #define BUZZER_PIN D5
+#define UDP_PORT 8888
 
-// Timing variables
-unsigned long lastSensorUpdate = 0;
-unsigned long lastPingTime = 0;
-unsigned long SENSOR_INTERVAL = 10000;  // Made non-const so it can be changed
-const unsigned long PING_INTERVAL = 25000;
+// EEPROM configuration
+#define EEPROM_SIZE 512
+#define WIFI_SSID_ADDR 0
+#define WIFI_PASS_ADDR 100
+#define CONFIG_ADDR 200
+
+// Network credentials
+String wifiSSID = "";
+String wifiPassword = "";
 
 // State variables
 bool isConnected = false;
@@ -42,48 +49,284 @@ bool namespaceConnected = false;
 bool sensorAvailable = false;
 bool alarmActive = false;
 bool buzzerOverride = false;
+bool isHotspotMode = false;
 int reconnectAttempts = 0;
 
-// Threshold variables (configurable)
+// Timing
+unsigned long lastSensorUpdate = 0;
+unsigned long lastPingTime = 0;
+unsigned long SENSOR_INTERVAL = 10000;
+const unsigned long PING_INTERVAL = 25000;
+
+// Thresholds
 int GAS_THRESHOLD = 600;
 float TEMP_THRESHOLD = 40.0;
 int SMOKE_THRESHOLD = 500;
 unsigned long muteUntil = 0;
 
+// Buffers
+static char websocketPath[256];
+
+// HTML Configuration Page
+const char CONFIG_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html><head>
+<title>ESP8266 Alarm Setup</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font-family:Arial,sans-serif;margin:0;padding:20px;background:#f5f5f5}
+.container{max-width:500px;margin:0 auto;background:#fff;padding:30px;border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}
+h1{color:#333;text-align:center;margin-bottom:30px}
+.form-group{margin-bottom:20px}
+label{display:block;margin-bottom:5px;font-weight:bold;color:#555}
+input[type="text"],input[type="password"],input[type="number"]{width:100%;padding:12px;border:1px solid #ddd;border-radius:5px;font-size:16px;box-sizing:border-box}
+input[type="submit"]{width:100%;padding:12px;background:#007bff;color:#fff;border:none;border-radius:5px;font-size:16px;cursor:pointer;transition:background 0.3s}
+input[type="submit"]:hover{background:#0056b3}
+.info{background:#e9ecef;padding:15px;border-radius:5px;margin-bottom:20px}
+.status{text-align:center;margin-top:20px;padding:10px;border-radius:5px;font-weight:bold}
+.success{background:#d4edda;color:#155724;border:1px solid #c3e6cb}
+</style>
+</head><body>
+<div class="container">
+<h1>🚨 ESP8266 Alarm Setup</h1>
+<div class="info">
+<strong>Device:</strong> %s<br>
+<strong>Version:</strong> v16.0<br>
+<strong>Features:</strong> Fire/Gas Detection, Remote Control
+</div>
+<form action='/save_config' method='POST'>
+<div class='form-group'>
+<label for='ssid'>WiFi Network:</label>
+<input type='text' id='ssid' name='ssid' required placeholder="Enter WiFi SSID">
+</div>
+<div class='form-group'>
+<label for='password'>WiFi Password:</label>
+<input type='password' id='password' name='password' placeholder="Enter WiFi Password">
+</div>
+<div class='form-group'>
+<label for='gas_threshold'>Gas Threshold (300-1000):</label>
+<input type='number' id='gas_threshold' name='gas_threshold' value='600' min='300' max='1000'>
+</div>
+<div class='form-group'>
+<label for='temp_threshold'>Temperature Threshold (°C):</label>
+<input type='number' id='temp_threshold' name='temp_threshold' value='40' min='20' max='80'>
+</div>
+<input type='submit' value='💾 Save Configuration'>
+</form>
+<div class="status">
+<p>📡 Device will restart after saving configuration</p>
+</div>
+</div>
+</body></html>
+)rawliteral";
+
 /**************************************************************
- * FUNCTION DECLARATIONS
+ * EEPROM FUNCTIONS
  **************************************************************/
-void webSocketEvent(WStype_t type, uint8_t * payload, size_t length);
-void handleWebSocketMessage(String message);
-void handleSocketIOMessage(String socketIOData);
-void parseSocketIOEvent(String eventData);
-void handleCommand(String eventName, JsonDocument& doc);
+void initEEPROM() {
+  EEPROM.begin(EEPROM_SIZE);
+  Serial.println("[EEPROM] Initialized");
+}
 
-void joinDeviceNamespace();
-void sendSocketIOEvent(String eventName, String jsonData);
-void sendDeviceOnline();
-void sendSensorData();
-void sendFireAlarm(float temperature, int gasValue);
-void sendCommandResponse(String command, bool success, String message);
-void sendDeviceStatus();
-void triggerTestAlarm();
-void sendWebSocketPing();
-void startWebSocketConnection();
+String readEEPROMString(int address, int maxLength) {
+  String result = "";
+  result.reserve(maxLength);
+  for (int i = 0; i < maxLength; i++) {
+    char c = EEPROM.read(address + i);
+    if (c == 0) break;
+    result += c;
+  }
+  return result;
+}
 
-// Enhanced alarm functions
-void muteAlarmForDuration(int seconds);
-void performSensorDiagnostics();
-void calibrateSensors(String sensorType);
-void triggerEmergencyAlarm(int duration);
-void sendDetailedSystemReport();
-void handleConfigUpdate(JsonDocument& doc);
-void sendUpdatedConfig();
-void sendSilentAlert(float temperature, int gasValue);
+void writeEEPROMString(int address, const String& data, int maxLength) {
+  int len = min((int)data.length(), maxLength - 1);
+  for (int i = 0; i < len; i++) {
+    EEPROM.write(address + i, data[i]);
+  }
+  EEPROM.write(address + len, 0);
+  EEPROM.commit();
+  Serial.printf("[EEPROM] Wrote string at %d: %s\n", address, data.c_str());
+}
+
+void saveConfiguration() {
+  StaticJsonDocument<200> config;
+  config["gas_threshold"] = GAS_THRESHOLD;
+  config["temp_threshold"] = TEMP_THRESHOLD;
+  config["smoke_threshold"] = SMOKE_THRESHOLD;
+  config["sensor_interval"] = SENSOR_INTERVAL;
+  
+  String configStr;
+  serializeJson(config, configStr);
+  writeEEPROMString(CONFIG_ADDR, configStr, 200);
+}
+
+void loadConfiguration() {
+  String configStr = readEEPROMString(CONFIG_ADDR, 200);
+  if (configStr.length() > 0) {
+    StaticJsonDocument<200> config;
+    if (deserializeJson(config, configStr) == DeserializationError::Ok) {
+      GAS_THRESHOLD = config["gas_threshold"] | 600;
+      TEMP_THRESHOLD = config["temp_threshold"] | 40.0;
+      SMOKE_THRESHOLD = config["smoke_threshold"] | 500;
+      SENSOR_INTERVAL = config["sensor_interval"] | 10000;
+      Serial.println("[Config] Loaded from EEPROM");
+    }
+  }
+}
 
 /**************************************************************
- * Enhanced WebSocket Event Handler
+ * WIFI FUNCTIONS
  **************************************************************/
+bool connectToWiFi(const String& ssid, const String& password) {
+  Serial.printf("[WiFi] Connecting to %s...\n", ssid.c_str());
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid.c_str(), password.c_str());
+  
+  unsigned long startTime = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startTime < 30000) {
+    delay(500);
+    Serial.print(".");
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("[WiFi] Connected! IP: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("[WiFi] Signal: %d dBm\n", WiFi.RSSI());
+    return true;
+  }
+  
+  Serial.println("[WiFi] Connection failed");
+  return false;
+}
 
+void startHotspot() {
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(HOTSPOT_SSID, HOTSPOT_PASSWORD);
+  Serial.printf("[Hotspot] Started: %s\n", HOTSPOT_SSID);
+  Serial.printf("[Hotspot] IP: %s\n", WiFi.softAPIP().toString().c_str());
+  isHotspotMode = true;
+}
+
+/**************************************************************
+ * UDP FUNCTIONS
+ **************************************************************/
+void handleUDP() {
+  int packetSize = udp.parsePacket();
+  if (packetSize) {
+    char packetBuffer[512];
+    int len = udp.read(packetBuffer, sizeof(packetBuffer) - 1);
+    if (len > 0) {
+      packetBuffer[len] = 0;
+      Serial.printf("[UDP] Received: %s\n", packetBuffer);
+      
+      StaticJsonDocument<300> doc;
+      DeserializationError error = deserializeJson(doc, packetBuffer);
+      
+      if (!error && doc.containsKey("ssid")) {
+        String ssid = doc["ssid"].as<String>();
+        String password = doc["password"].as<String>();
+        int gasThreshold = doc["gas_threshold"] | 600;
+        float tempThreshold = doc["temp_threshold"] | 40.0;
+        
+        Serial.println("[UDP] Received WiFi credentials and config");
+        
+        // Save WiFi credentials
+        writeEEPROMString(WIFI_SSID_ADDR, ssid, 100);
+        writeEEPROMString(WIFI_PASS_ADDR, password, 100);
+        
+        // Save configuration
+        GAS_THRESHOLD = gasThreshold;
+        TEMP_THRESHOLD = tempThreshold;
+        saveConfiguration();
+        
+        // Send response
+        StaticJsonDocument<150> response;
+        response["status"] = "success";
+        response["message"] = "Configuration received";
+        response["device"] = SERIAL_NUMBER;
+        
+        String responseStr;
+        serializeJson(response, responseStr);
+        
+        udp.beginPacket(udp.remoteIP(), udp.remotePort());
+        udp.print(responseStr);
+        udp.endPacket();
+        
+        // Restart with new configuration
+        delay(2000);
+        ESP.restart();
+      }
+    }
+  }
+}
+
+/**************************************************************
+ * HTTP SERVER FUNCTIONS
+ **************************************************************/
+#include <ESP8266WebServer.h>
+ESP8266WebServer httpServer(80);
+
+void setupHttpServer() {
+  // Configuration page
+  httpServer.on("/", HTTP_GET, []() {
+    char html[4000];
+    snprintf(html, sizeof(html), CONFIG_HTML, SERIAL_NUMBER);
+    httpServer.send(200, "text/html", html);
+  });
+  
+  // Save configuration
+  httpServer.on("/save_config", HTTP_POST, []() {
+    String ssid = httpServer.arg("ssid");
+    String password = httpServer.arg("password");
+    int gasThreshold = httpServer.arg("gas_threshold").toInt();
+    float tempThreshold = httpServer.arg("temp_threshold").toFloat();
+    
+    writeEEPROMString(WIFI_SSID_ADDR, ssid, 100);
+    writeEEPROMString(WIFI_PASS_ADDR, password, 100);
+    
+    GAS_THRESHOLD = gasThreshold;
+    TEMP_THRESHOLD = tempThreshold;
+    saveConfiguration();
+    
+    httpServer.send(200, "text/html", 
+      "<html><body style='font-family:Arial;text-align:center;padding:50px'>"
+      "<h1>✅ Configuration Saved</h1>"
+      "<p>Device will restart and connect to: <strong>" + ssid + "</strong></p>"
+      "<p>Redirecting in 3 seconds...</p>"
+      "<script>setTimeout(function(){window.location.href='/';}, 3000);</script>"
+      "</body></html>");
+    
+    delay(2000);
+    ESP.restart();
+  });
+  
+  // Status API
+  httpServer.on("/status", HTTP_GET, []() {
+    StaticJsonDocument<512> doc;
+    doc["device"] = SERIAL_NUMBER;
+    doc["status"] = alarmActive ? "alarm" : "normal";
+    doc["wifi"]["connected"] = WiFi.status() == WL_CONNECTED;
+    doc["wifi"]["ssid"] = WiFi.SSID();
+    doc["wifi"]["ip"] = WiFi.localIP().toString();
+    doc["wifi"]["rssi"] = WiFi.RSSI();
+    doc["thresholds"]["gas"] = GAS_THRESHOLD;
+    doc["thresholds"]["temperature"] = TEMP_THRESHOLD;
+    doc["uptime"] = millis() / 1000;
+    
+    String response;
+    serializeJson(doc, response);
+    
+    httpServer.sendHeader("Access-Control-Allow-Origin", "*");
+    httpServer.send(200, "application/json", response);
+  });
+  
+  httpServer.begin();
+  Serial.println("[HTTP] Server started on port 80");
+}
+
+/**************************************************************
+ * WEBSOCKET FUNCTIONS (SSL)
+ **************************************************************/
 void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
   switch(type) {
     case WStype_DISCONNECTED:
@@ -93,14 +336,12 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
       break;
       
     case WStype_CONNECTED:
-      {
-        Serial.printf("[WebSocket] Connected to server: %s\n", payload);
-        Serial.println("[WebSocket] ✅ WebSocket connection established");
-        isConnected = true;
-        namespaceConnected = false;
-        reconnectAttempts = 0;
-        break;
-      }
+      Serial.printf("[WebSocket] Connected to server: %s\n", payload);
+      Serial.println("[WebSocket] ✅ SSL WebSocket connection established");
+      isConnected = true;
+      namespaceConnected = false;
+      reconnectAttempts = 0;
+      break;
       
     case WStype_TEXT:
       {
@@ -109,18 +350,6 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
         handleWebSocketMessage(message);
         break;
       }
-      
-    case WStype_BIN:
-      Serial.println("[WebSocket] Binary data received");
-      break;
-      
-    case WStype_PING:
-      Serial.println("[WebSocket] Ping received");
-      break;
-      
-    case WStype_PONG:
-      Serial.println("[WebSocket] Pong received");
-      break;
       
     case WStype_ERROR:
       Serial.printf("[WebSocket] Error: %s\n", payload);
@@ -139,23 +368,14 @@ void handleWebSocketMessage(String message) {
   
   switch(engineIOType) {
     case '0': // Engine.IO OPEN
-      {
-        Serial.println("[Engine.IO] OPEN - Session established");
-        if (message.length() > 1) {
-          String sessionData = message.substring(1);
-          Serial.println("[Engine.IO] Session data: " + sessionData);
-          delay(1000);
-          joinDeviceNamespace();
-        }
-        break;
-      }
-      
-    case '1': // Engine.IO CLOSE
-      Serial.println("[Engine.IO] CLOSE received");
+      Serial.println("[Engine.IO] OPEN - Session established");
+      delay(1000);
+      joinDeviceNamespace();
       break;
       
     case '2': // Engine.IO PING
       Serial.println("[Engine.IO] PING received");
+      webSocket.sendTXT("3"); // Send PONG
       break;
       
     case '3': // Engine.IO PONG
@@ -163,16 +383,10 @@ void handleWebSocketMessage(String message) {
       break;
       
     case '4': // Engine.IO MESSAGE
-      {
-        if (message.length() > 1) {
-          String socketIOData = message.substring(1);
-          handleSocketIOMessage(socketIOData);
-        }
-        break;
+      if (message.length() > 1) {
+        String socketIOData = message.substring(1);
+        handleSocketIOMessage(socketIOData);
       }
-      
-    default:
-      Serial.printf("[Engine.IO] Unknown packet type: %c\n", engineIOType);
       break;
   }
 }
@@ -184,44 +398,25 @@ void handleSocketIOMessage(String socketIOData) {
   
   switch(socketIOType) {
     case '0': // Socket.IO CONNECT
-      {
-        Serial.println("[Socket.IO] CONNECT acknowledged");
-        if (socketIOData.indexOf("/device") != -1) {
-          Serial.println("[Socket.IO] ✅ Connected to /device namespace!");
-          namespaceConnected = true;
-          delay(1000);
-          sendDeviceOnline();
-        }
-        break;
+      Serial.println("[Socket.IO] CONNECT acknowledged");
+      if (socketIOData.indexOf("/device") != -1) {
+        Serial.println("[Socket.IO] ✅ Connected to /device namespace!");
+        namespaceConnected = true;
+        delay(1000);
+        sendDeviceOnline();
       }
-      
-    case '1': // Socket.IO DISCONNECT
-      Serial.println("[Socket.IO] DISCONNECT received");
-      namespaceConnected = false;
       break;
       
     case '2': // Socket.IO EVENT
       parseSocketIOEvent(socketIOData.substring(1));
       break;
       
-    case '3': // Socket.IO ACK
-      Serial.println("[Socket.IO] ACK received");
-      break;
-      
     case '4': // Socket.IO ERROR
-      {
-        Serial.println("[Socket.IO] ERROR received");
-        Serial.println("[Socket.IO] Error data: " + socketIOData);
-        if (!namespaceConnected) {
-          Serial.println("[Socket.IO] Retrying namespace connection...");
-          delay(2000);
-          joinDeviceNamespace();
-        }
-        break;
+      Serial.println("[Socket.IO] ERROR received");
+      if (!namespaceConnected) {
+        delay(2000);
+        joinDeviceNamespace();
       }
-      
-    default:
-      Serial.printf("[Socket.IO] Unknown packet type: %c\n", socketIOType);
       break;
   }
 }
@@ -231,200 +426,94 @@ void parseSocketIOEvent(String eventData) {
     eventData = eventData.substring(8);
   }
   
-  int firstBracket = eventData.indexOf('[');
-  if (firstBracket == -1) return;
-  
-  int firstQuote = eventData.indexOf('"', firstBracket);
+  int firstQuote = eventData.indexOf('"');
   if (firstQuote == -1) return;
   
   int secondQuote = eventData.indexOf('"', firstQuote + 1);
   if (secondQuote == -1) return;
   
   String eventName = eventData.substring(firstQuote + 1, secondQuote);
-  Serial.println("[Socket.IO] Event name: " + eventName);
   
   int jsonStart = eventData.indexOf('{');
   if (jsonStart != -1) {
     String jsonData = eventData.substring(jsonStart, eventData.lastIndexOf('}') + 1);
-    Serial.println("[Socket.IO] JSON data: " + jsonData);
     
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, jsonData);
     
     if (!err) {
       handleCommand(eventName, doc);
-    } else {
-      Serial.println("[Socket.IO] JSON parse error: " + String(err.c_str()));
     }
   }
 }
-
-/**************************************************************
- * ENHANCED COMMAND HANDLER
- **************************************************************/
 
 void handleCommand(String eventName, JsonDocument& doc) {
   if (eventName == "command") {
     String action = doc["action"];
     
-    // ========== BASIC COMMANDS ==========
     if (action == "toggleBuzzer") {
       bool status = doc["state"]["power_status"];
       buzzerOverride = status;
       digitalWrite(BUZZER_PIN, status ? HIGH : LOW);
-      Serial.println("[Command] Buzzer control: " + String(status ? "ON" : "OFF"));
       sendCommandResponse("toggleBuzzer", true, "Buzzer " + String(status ? "activated" : "deactivated"));
     }
     else if (action == "resetAlarm") {
       alarmActive = false;
       buzzerOverride = false;
       digitalWrite(BUZZER_PIN, LOW);
-      Serial.println("[Command] Alarm reset");
       sendCommandResponse("resetAlarm", true, "Alarm reset successfully");
       sendDeviceStatus();
     }
     else if (action == "testAlarm") {
-      Serial.println("[Command] Testing alarm system");
       triggerTestAlarm();
       sendCommandResponse("testAlarm", true, "Test alarm executed");
     }
-    else if (action == "getStatus") {
-      sendDeviceStatus();
-      sendCommandResponse("getStatus", true, "Status sent");
-    }
-    
-    // ========== ENHANCED COMMANDS ==========
     else if (action == "updateThreshold") {
       if (doc["config"].is<JsonObject>()) {
         JsonObject config = doc["config"];
-        
         if (config["gas_threshold"].is<int>()) {
           GAS_THRESHOLD = config["gas_threshold"];
-          Serial.println("[Config] Gas threshold updated: " + String(GAS_THRESHOLD));
         }
         if (config["temp_threshold"].is<float>()) {
           TEMP_THRESHOLD = config["temp_threshold"];
-          Serial.println("[Config] Temperature threshold updated: " + String(TEMP_THRESHOLD));
         }
-        if (config["smoke_threshold"].is<int>()) {
-          SMOKE_THRESHOLD = config["smoke_threshold"];
-          Serial.println("[Config] Smoke threshold updated: " + String(SMOKE_THRESHOLD));
-        }
-        
+        saveConfiguration();
         sendCommandResponse("updateThreshold", true, "Thresholds updated successfully");
-        sendUpdatedConfig();
       }
     }
     else if (action == "muteAlarm") {
-      int duration = doc["duration"] | 300; // Default 5 minutes
+      int duration = doc["duration"] | 300;
       muteAlarmForDuration(duration);
       sendCommandResponse("muteAlarm", true, "Alarm muted for " + String(duration) + " seconds");
     }
-    else if (action == "sensorCheck") {
-      performSensorDiagnostics();
-      sendCommandResponse("sensorCheck", true, "Sensor diagnostics completed");
-    }
-    else if (action == "restart") {
-      sendCommandResponse("restart", true, "ESP8266 restarting...");
-      delay(1000);
-      ESP.restart();
-    }
-    else if (action == "calibrateSensor") {
-      String sensorType = doc["sensor_type"] | "all";
-      calibrateSensors(sensorType);
-      sendCommandResponse("calibrateSensor", true, "Sensor calibration started");
-    }
-    else if (action == "emergencyAlarm") {
-      int duration = doc["duration"] | 30; // Default 30 seconds
-      triggerEmergencyAlarm(duration);
-      sendCommandResponse("emergencyAlarm", true, "Emergency alarm activated");
-    }
-    else if (action == "setDataInterval") {
-      int newInterval = doc["interval"] | 10000; // Default 10 seconds
-      if (newInterval >= 1000 && newInterval <= 60000) {
-        SENSOR_INTERVAL = newInterval;
-        sendCommandResponse("setDataInterval", true, "Data interval set to " + String(newInterval) + "ms");
-      } else {
-        sendCommandResponse("setDataInterval", false, "Invalid interval range (1000-60000ms)");
-      }
-    }
-    else if (action == "systemReport") {
-      sendDetailedSystemReport();
-      sendCommandResponse("systemReport", true, "System report sent");
-    }
-    else {
-      Serial.println("[Command] Unknown action: " + action);
-      sendCommandResponse(action, false, "Unknown command: " + action);
-    }
-  }
-  
-  // ========== ESP8266 SPECIFIC EVENTS ==========
-  else if (eventName == "reset_alarm") {
-    alarmActive = false;
-    buzzerOverride = false;
-    digitalWrite(BUZZER_PIN, LOW);
-    Serial.println("[ESP8266] Remote alarm reset");
-    sendDeviceStatus();
-  }
-  else if (eventName == "test_alarm") {
-    Serial.println("[ESP8266] Remote test alarm");
-    triggerTestAlarm();
-  }
-  else if (eventName == "update_config") {
-    Serial.println("[ESP8266] Config update received");
-    handleConfigUpdate(doc);
   }
 }
 
-/**************************************************************
- * Socket.IO Communication Functions
- **************************************************************/
-
 void joinDeviceNamespace() {
-  Serial.println("[Socket.IO] Attempting to join /device namespace...");
-  String namespaceJoin = "40/device,";
-  webSocket.sendTXT(namespaceJoin);
-  Serial.println("[Socket.IO] Sent namespace join request: " + namespaceJoin);
+  Serial.println("[Socket.IO] Joining /device namespace...");
+  webSocket.sendTXT("40/device,");
 }
 
 void sendSocketIOEvent(String eventName, String jsonData) {
-  if (!namespaceConnected) {
-    Serial.println("[Socket.IO] WARNING: Namespace not connected, cannot send events");
-    return;
-  }
+  if (!namespaceConnected) return;
   
   String eventPayload = "42/device,[\"" + eventName + "\"," + jsonData + "]";
   webSocket.sendTXT(eventPayload);
-  Serial.println("[Socket.IO] Sent event '" + eventName + "'");
 }
 
 void sendDeviceOnline() {
-  if (!namespaceConnected) {
-    Serial.println("[Socket.IO] Cannot send device_online: namespace not connected");
-    return;
-  }
+  if (!namespaceConnected) return;
   
   JsonDocument doc;
   doc["deviceId"] = DEVICE_ID;
   doc["serialNumber"] = SERIAL_NUMBER;
   doc["deviceType"] = "FIRE_ALARM_SYSTEM";
-  doc["firmware_version"] = "v15.0-Enhanced-Commands";
+  doc["firmware_version"] = "v16.0-UDP-SSL";
   doc["hardware_version"] = "ESP8266-v1.0";
-  doc["isInput"] = true;
-  doc["isOutput"] = true;
-  doc["isSensor"] = true;
-  doc["isActuator"] = true;
-  
-  // ESP8266 capabilities
   doc["capabilities"]["smoke_detection"] = true;
   doc["capabilities"]["temperature_monitoring"] = true;
   doc["capabilities"]["gas_detection"] = true;
   doc["capabilities"]["alarm_control"] = true;
-  doc["capabilities"]["websocket_native"] = true;
-  doc["capabilities"]["remote_configuration"] = true;
-  doc["capabilities"]["diagnostics"] = true;
-  
-  // System info
   doc["esp8266_info"]["chip_id"] = String(ESP.getChipId(), HEX);
   doc["esp8266_info"]["free_heap"] = ESP.getFreeHeap();
   doc["esp8266_info"]["wifi_rssi"] = WiFi.RSSI();
@@ -433,15 +522,12 @@ void sendDeviceOnline() {
   String jsonString;
   serializeJson(doc, jsonString);
   sendSocketIOEvent("device_online", jsonString);
-  
-  Serial.println("[DEVICE] ✅ Online message sent successfully!");
 }
 
 void sendSensorData() {
   if (millis() - lastSensorUpdate < SENSOR_INTERVAL) return;
   if (!namespaceConnected) return;
   
-  // Read sensors
   sensors_event_t humidity, temp;
   float temperature = 25.0;
   float humidityValue = 50.0;
@@ -456,7 +542,6 @@ void sendSensorData() {
   
   int gasValue = analogRead(MQ2_PIN);
   
-  // Enhanced alarm checking with mute support
   bool shouldAlarm = (temperature > TEMP_THRESHOLD || gasValue > GAS_THRESHOLD) && !buzzerOverride;
   bool isMuted = (millis() < muteUntil);
   
@@ -469,27 +554,15 @@ void sendSensorData() {
     digitalWrite(BUZZER_PIN, LOW);
   }
   
-  // If muted, still detect but don't sound alarm
-  if (shouldAlarm && isMuted) {
-    Serial.println("[MUTED] Alarm condition detected but muted");
-    sendSilentAlert(temperature, gasValue);
-  }
-  
-  // Send sensor data
   JsonDocument doc;
   doc["deviceId"] = DEVICE_ID;
   doc["serialNumber"] = SERIAL_NUMBER;
   doc["gas"] = gasValue;
   doc["temperature"] = temperature;
   doc["humidity"] = humidityValue;
-  doc["smoke_level"] = gasValue;
-  doc["flame_detected"] = false;
   doc["alarmActive"] = alarmActive;
   doc["buzzerOverride"] = buzzerOverride;
   doc["muted"] = isMuted;
-  doc["wifi_rssi"] = WiFi.RSSI();
-  doc["free_memory"] = ESP.getFreeHeap();
-  doc["uptime"] = millis() / 1000;
   doc["timestamp"] = millis();
 
   String jsonString;
@@ -497,7 +570,6 @@ void sendSensorData() {
   sendSocketIOEvent("sensorData", jsonString);
   
   lastSensorUpdate = millis();
-  Serial.println("[SENSOR] Data sent - Gas: " + String(gasValue) + ", Temp: " + String(temperature) + ", Muted: " + String(isMuted ? "YES" : "NO"));
 }
 
 void sendFireAlarm(float temperature, int gasValue) {
@@ -508,16 +580,11 @@ void sendFireAlarm(float temperature, int gasValue) {
   doc["severity"] = "high";
   doc["temperature"] = temperature;
   doc["gas_level"] = gasValue;
-  doc["smoke_level"] = gasValue;
-  doc["location"] = "unknown";
-  doc["wifi_rssi"] = WiFi.RSSI();
   doc["timestamp"] = millis();
   
   String jsonString;
   serializeJson(doc, jsonString);
   sendSocketIOEvent("alarm_trigger", jsonString);
-  
-  Serial.println("[ALARM] 🚨 FIRE ALARM TRIGGERED!");
 }
 
 void sendCommandResponse(String command, bool success, String message) {
@@ -525,7 +592,6 @@ void sendCommandResponse(String command, bool success, String message) {
   doc["success"] = success;
   doc["result"] = message;
   doc["deviceId"] = DEVICE_ID;
-  doc["serialNumber"] = SERIAL_NUMBER;
   doc["commandId"] = command;
   doc["timestamp"] = millis();
   
@@ -541,15 +607,8 @@ void sendDeviceStatus() {
   doc["alarmActive"] = alarmActive;
   doc["buzzerOverride"] = buzzerOverride;
   doc["muted"] = (millis() < muteUntil);
-  doc["muteTimeRemaining"] = (millis() < muteUntil) ? (muteUntil - millis()) / 1000 : 0;
   doc["thresholds"]["gas"] = GAS_THRESHOLD;
   doc["thresholds"]["temperature"] = TEMP_THRESHOLD;
-  doc["thresholds"]["smoke"] = SMOKE_THRESHOLD;
-  doc["wifi_rssi"] = WiFi.RSSI();
-  doc["free_heap"] = ESP.getFreeHeap();
-  doc["uptime"] = millis() / 1000;
-  doc["connection_method"] = "WEBSOCKET_DIRECT";
-  doc["namespace_connected"] = namespaceConnected;
   doc["timestamp"] = millis();
   
   String jsonString;
@@ -558,255 +617,39 @@ void sendDeviceStatus() {
 }
 
 void triggerTestAlarm() {
-  Serial.println("[TEST] Triggering test alarm");
-  
   digitalWrite(BUZZER_PIN, HIGH);
   delay(3000);
   digitalWrite(BUZZER_PIN, LOW);
-  
   sendFireAlarm(25.0, 100);
-  Serial.println("[TEST] Test alarm completed");
 }
-
-void sendWebSocketPing() {
-  if (isConnected) {
-    webSocket.sendTXT("2");
-    Serial.println("[WebSocket] Ping sent - Namespace connected: " + String(namespaceConnected ? "YES" : "NO"));
-    
-    if (!namespaceConnected) {
-      Serial.println("[WebSocket] Attempting to rejoin namespace...");
-      joinDeviceNamespace();
-    }
-  }
-}
-
-/**************************************************************
- * ENHANCED ALARM FUNCTIONS
- **************************************************************/
 
 void muteAlarmForDuration(int seconds) {
   muteUntil = millis() + (seconds * 1000);
   digitalWrite(BUZZER_PIN, LOW);
   Serial.println("[MUTE] Alarm muted for " + String(seconds) + " seconds");
-  
-  JsonDocument doc;
-  doc["deviceId"] = DEVICE_ID;
-  doc["muted"] = true;
-  doc["mute_until"] = muteUntil;
-  doc["duration"] = seconds;
-  doc["timestamp"] = millis();
-  
-  String jsonString;
-  serializeJson(doc, jsonString);
-  sendSocketIOEvent("alarm_muted", jsonString);
 }
 
-void performSensorDiagnostics() {
-  JsonDocument doc;
-  doc["deviceId"] = DEVICE_ID;
-  doc["sensor_status"]["aht_sensor"] = sensorAvailable;
-  doc["sensor_status"]["gas_sensor"] = (analogRead(MQ2_PIN) > 0);
-  doc["sensor_status"]["buzzer"] = true;
+void setupWebSocketConnection() {
+  snprintf(websocketPath, sizeof(websocketPath), WEBSOCKET_PATH_TEMPLATE, SERIAL_NUMBER);
   
-  if (sensorAvailable) {
-    sensors_event_t humidity, temp;
-    bool ahtWorking = aht.getEvent(&humidity, &temp);
-    doc["sensor_readings"]["temperature"] = ahtWorking ? temp.temperature : -999;
-    doc["sensor_readings"]["humidity"] = ahtWorking ? humidity.relative_humidity : -999;
-  }
-  doc["sensor_readings"]["gas"] = analogRead(MQ2_PIN);
-  doc["sensor_readings"]["wifi_rssi"] = WiFi.RSSI();
-  doc["sensor_readings"]["free_heap"] = ESP.getFreeHeap();
-  doc["timestamp"] = millis();
+  Serial.println("\n[WebSocket] Starting SSL connection...");
+  Serial.printf("Host: %s:%d\n", WEBSOCKET_HOST, WEBSOCKET_PORT);
+  Serial.printf("Path: %s\n", websocketPath);
   
-  String jsonString;
-  serializeJson(doc, jsonString);
-  sendSocketIOEvent("sensor_diagnostics", jsonString);
-  
-  Serial.println("[DIAGNOSTICS] Sensor check completed");
-}
-
-void calibrateSensors(String sensorType) {
-  Serial.println("[CALIBRATION] Starting calibration for: " + sensorType);
-  
-  if (sensorType == "gas" || sensorType == "all") {
-    int total = 0;
-    for (int i = 0; i < 10; i++) {
-      total += analogRead(MQ2_PIN);
-      delay(100);
-    }
-    int gasBaseline = total / 10;
-    Serial.println("[CALIBRATION] Gas baseline: " + String(gasBaseline));
-  }
-  
-  if (sensorType == "temperature" || sensorType == "all") {
-    if (sensorAvailable) {
-      aht.begin();
-      Serial.println("[CALIBRATION] AHT sensor reset");
-    }
-  }
-  
-  JsonDocument doc;
-  doc["deviceId"] = DEVICE_ID;
-  doc["calibration_type"] = sensorType;
-  doc["status"] = "completed";
-  doc["timestamp"] = millis();
-  
-  String jsonString;
-  serializeJson(doc, jsonString);
-  sendSocketIOEvent("calibration_result", jsonString);
-}
-
-void triggerEmergencyAlarm(int duration) {
-  Serial.println("[EMERGENCY] Manual emergency alarm activated");
-  
-  alarmActive = true;
-  unsigned long startTime = millis();
-  
-  while (millis() - startTime < (duration * 1000)) {
-    digitalWrite(BUZZER_PIN, HIGH);
-    delay(200);
-    digitalWrite(BUZZER_PIN, LOW);
-    delay(200);
-    
-    webSocket.loop();
-    if (!alarmActive) break;
-  }
-  
-  alarmActive = false;
-  digitalWrite(BUZZER_PIN, LOW);
-  
-  JsonDocument doc;
-  doc["device_id"] = DEVICE_ID;
-  doc["alarm_type"] = "manual_emergency";
-  doc["severity"] = "critical";
-  doc["duration"] = duration;
-  doc["timestamp"] = millis();
-  
-  String jsonString;
-  serializeJson(doc, jsonString);
-  sendSocketIOEvent("emergency_alarm", jsonString);
-}
-
-void sendDetailedSystemReport() {
-  JsonDocument doc;
-  doc["deviceId"] = DEVICE_ID;
-  doc["serialNumber"] = SERIAL_NUMBER;
-  
-  doc["system"]["uptime"] = millis() / 1000;
-  doc["system"]["free_heap"] = ESP.getFreeHeap();
-  doc["system"]["chip_id"] = String(ESP.getChipId(), HEX);
-  doc["system"]["cpu_freq"] = ESP.getCpuFreqMHz();
-  doc["system"]["sdk_version"] = ESP.getSdkVersion();
-  
-  doc["network"]["wifi_ssid"] = WiFi.SSID();
-  doc["network"]["wifi_rssi"] = WiFi.RSSI();
-  doc["network"]["ip_address"] = WiFi.localIP().toString();
-  doc["network"]["mac_address"] = WiFi.macAddress();
-  
-  doc["thresholds"]["gas"] = GAS_THRESHOLD;
-  doc["thresholds"]["temperature"] = TEMP_THRESHOLD;
-  doc["thresholds"]["smoke"] = SMOKE_THRESHOLD;
-  
-  doc["status"]["alarm_active"] = alarmActive;
-  doc["status"]["buzzer_override"] = buzzerOverride;
-  doc["status"]["muted"] = (millis() < muteUntil);
-  doc["status"]["namespace_connected"] = namespaceConnected;
-  
-  doc["timestamp"] = millis();
-  
-  String jsonString;
-  serializeJson(doc, jsonString);
-  sendSocketIOEvent("system_report", jsonString);
-}
-
-void handleConfigUpdate(JsonDocument& doc) {
-  if (doc["config"].is<JsonObject>()) {
-    JsonObject config = doc["config"];
-    bool updated = false;
-    
-    if (config["smoke_threshold"].is<int>()) {
-      SMOKE_THRESHOLD = config["smoke_threshold"];
-      updated = true;
-    }
-    if (config["temp_threshold"].is<float>()) {
-      TEMP_THRESHOLD = config["temp_threshold"];
-      updated = true;
-    }
-    if (config["gas_threshold"].is<int>()) {
-      GAS_THRESHOLD = config["gas_threshold"];
-      updated = true;
-    }
-    if (config["sensor_read_interval"].is<int>()) {
-      SENSOR_INTERVAL = config["sensor_read_interval"];
-      updated = true;
-    }
-    
-    if (updated) {
-      Serial.println("[CONFIG] Configuration updated successfully");
-      sendUpdatedConfig();
-    }
-  }
-}
-
-void sendUpdatedConfig() {
-  JsonDocument doc;
-  doc["deviceId"] = DEVICE_ID;
-  doc["config"]["gas_threshold"] = GAS_THRESHOLD;
-  doc["config"]["temp_threshold"] = TEMP_THRESHOLD;
-  doc["config"]["smoke_threshold"] = SMOKE_THRESHOLD;
-  doc["config"]["sensor_interval"] = SENSOR_INTERVAL;
-  doc["timestamp"] = millis();
-  
-  String jsonString;
-  serializeJson(doc, jsonString);
-  sendSocketIOEvent("config_updated", jsonString);
-}
-
-void sendSilentAlert(float temperature, int gasValue) {
-  JsonDocument doc;
-  doc["device_id"] = DEVICE_ID;
-  doc["alert_type"] = "silent";
-  doc["temperature"] = temperature;
-  doc["gas_level"] = gasValue;
-  doc["muted"] = true;
-  doc["timestamp"] = millis();
-  
-  String jsonString;
-  serializeJson(doc, jsonString);
-  sendSocketIOEvent("silent_alert", jsonString);
-}
-
-/**************************************************************
- * Connection Functions
- **************************************************************/
-
-void startWebSocketConnection() {
-  Serial.println("\n[WebSocket] Starting connection...");
-  Serial.println("Host: " + WEBSOCKET_HOST + ":" + String(WEBSOCKET_PORT));
-  Serial.println("Path: " + WEBSOCKET_PATH);
-  Serial.println("Device ID: " + String(DEVICE_ID));
-  Serial.println("Serial Number: " + String(SERIAL_NUMBER));
-  
-  webSocket.begin(WEBSOCKET_HOST.c_str(), WEBSOCKET_PORT, WEBSOCKET_PATH.c_str());
+  // SSL WebSocket connection
+  webSocket.beginSSL(WEBSOCKET_HOST, WEBSOCKET_PORT, websocketPath);
   webSocket.onEvent(webSocketEvent);
   webSocket.setReconnectInterval(5000);
   
-  webSocket.setExtraHeaders("User-Agent: ESP8266-FireAlarm/15.0\r\nOrigin: http://192.168.51.115:7777");
-  
-  Serial.println("[WebSocket] Connection initiated with enhanced alarm commands");
+  Serial.println("[WebSocket] SSL connection initiated");
 }
 
 /**************************************************************
- * Main Functions
+ * MAIN FUNCTIONS
  **************************************************************/
-
 void setup() {
   Serial.begin(115200);
-  Serial.println("\n=== ESP8266 Fire Alarm v15.0 - Enhanced Commands ===");
-  Serial.println("✅ Full alarm command support enabled");
-  Serial.println("✅ Remote configuration support");
-  Serial.println("✅ Advanced diagnostics enabled");
+  Serial.println("\n=== ESP8266 Fire Alarm v16.0 - UDP + SSL ===");
   Serial.println("Device ID: " + String(DEVICE_ID));
   Serial.println("Serial Number: " + String(SERIAL_NUMBER));
   
@@ -816,6 +659,14 @@ void setup() {
   pinMode(BUZZER_PIN_N, OUTPUT);
   digitalWrite(BUZZER_PIN_N, LOW);
   digitalWrite(BUZZER_PIN, LOW);
+  
+  // Initialize EEPROM and load configuration
+  initEEPROM();
+  loadConfiguration();
+  
+  // Load WiFi credentials
+  wifiSSID = readEEPROMString(WIFI_SSID_ADDR, 100);
+  wifiPassword = readEEPROMString(WIFI_PASS_ADDR, 100);
   
   // Initialize I2C and sensor
   Wire.begin(4, 5);
@@ -827,69 +678,55 @@ void setup() {
     sensorAvailable = true;
   }
   
-  // Connect to WiFi
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print("[WiFi] Connecting");
-  
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+  // Connect to WiFi or start hotspot
+  if (wifiSSID.length() > 0 && connectToWiFi(wifiSSID, wifiPassword)) {
+    setupWebSocketConnection();
+  } else {
+    startHotspot();
+    udp.begin(UDP_PORT);
+    Serial.printf("[UDP] Listening on port %d\n", UDP_PORT);
   }
   
-  Serial.println(" Connected!");
-  Serial.println("[WiFi] IP: " + WiFi.localIP().toString());
-  Serial.println("[WiFi] RSSI: " + String(WiFi.RSSI()) + " dBm");
+  // Start HTTP server
+  setupHttpServer();
   
-  // Display enhanced capabilities
-  Serial.println("\n🔥 ENHANCED ALARM CAPABILITIES:");
-  Serial.println("   • Basic: toggleBuzzer, resetAlarm, testAlarm, getStatus");
-  Serial.println("   • Advanced: updateThreshold, muteAlarm, sensorCheck");
-  Serial.println("   • Emergency: emergencyAlarm, restart, calibrateSensor");
-  Serial.println("   • Config: setDataInterval, systemReport, update_config");
-  Serial.println("   • Events: reset_alarm, test_alarm (direct ESP8266 events)");
-
-    // TEST BUZZER AT STARTUP
+  // Test buzzer at startup
   Serial.println("🔔 Testing buzzer at startup...");
-  
-  // Test buzzer 3 lần
   for(int i = 0; i < 3; i++) {
     digitalWrite(BUZZER_PIN, HIGH);
-    Serial.println("Buzzer ON");
     delay(500);
     digitalWrite(BUZZER_PIN, LOW);
-    Serial.println("Buzzer OFF");
     delay(500);
   }
-  
   Serial.println("🔔 Buzzer test completed");
-  
-  // Start WebSocket connection
-  startWebSocketConnection();
 }
 
 void loop() {
-  webSocket.loop();  // Process WebSocket events
-  
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[WiFi] Connection lost, reconnecting...");
-    WiFi.reconnect();
-    delay(5000);
-    return;
+  if (!isHotspotMode) {
+    webSocket.loop();
   }
   
-  if (isConnected && namespaceConnected) {
-    sendSensorData();
-    
-    // Send ping every 25 seconds
-    if (millis() - lastPingTime > PING_INTERVAL) {
-      sendWebSocketPing();
-      lastPingTime = millis();
-    }
+  httpServer.handleClient();
+  
+  if (isHotspotMode) {
+    handleUDP();
   } else {
-    reconnectAttempts++;
-    if (reconnectAttempts % 10 == 0) {
-      Serial.println("[WebSocket] Status - Connected: " + String(isConnected ? "YES" : "NO") + 
-                    ", Namespace: " + String(namespaceConnected ? "YES" : "NO"));
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("[WiFi] Connection lost, reconnecting...");
+      if (!connectToWiFi(wifiSSID, wifiPassword)) {
+        startHotspot();
+        udp.begin(UDP_PORT);
+      }
+      return;
+    }
+    
+    if (isConnected && namespaceConnected) {
+      sendSensorData();
+      
+      if (millis() - lastPingTime > PING_INTERVAL) {
+        webSocket.sendTXT("2"); // Send ping
+        lastPingTime = millis();
+      }
     }
   }
   
