@@ -1,4 +1,4 @@
-#define FIRMWARE_VERSION "4.2.0"
+#define FIRMWARE_VERSION "4.2.1"
 #define GATEWAY_ID "ESP_GATEWAY_002"
 
 #include <ESP8266WiFi.h>
@@ -7,12 +7,12 @@
 
 // ✅ OPTIMIZED: Compact message structure matching ESP-01 and ESP32
 struct CompactMessage {
-  char type[4];        // "CMD", "ACK", "HBT", "STS"
-  char action[4];      // "OPN", "CLS", "TGL", "ALV", etc.
+  char type[4];        // "CMD", "ACK", "HBT", "STS" - NULL terminated
+  char action[4];      // "OPN", "CLS", "TGL", "ALV", etc. - NULL terminated
   int angle;           // Servo angle
   bool success;        // Success flag
   unsigned long ts;    // Timestamp
-};
+} __attribute__((packed)); // Ensure consistent packing
 
 // ✅ UPDATED: Extended door configuration for 10 doors
 struct DoorConfig {
@@ -75,13 +75,17 @@ void setup() {
   Serial.begin(115200);
   delay(1500);
   
-  Serial.println("ESP Gateway v4.2.0");
+  Serial.println("ESP Gateway v4.2.1 - FIXED");
   Serial.println("ID:" + String(GATEWAY_ID));
   Serial.println("Active Doors:" + String(TOTAL_DOORS) + " (7 Servo + 1 Rolling)");
   Serial.println("Configured: ID8(Servo-NoMAC), ID10(Sliding-Placeholder)");
   Serial.println("MAC:" + WiFi.macAddress());
   
   setupESPNow();
+  
+  // Initialize buffers
+  memset(&sendBuffer, 0, sizeof(sendBuffer));
+  memset(&receiveBuffer, 0, sizeof(receiveBuffer));
   
   Serial.println("Gateway Ready with Mixed Door Types");
 }
@@ -157,18 +161,35 @@ void onDataSent(uint8_t *mac_addr, uint8_t sendStatus) {
     Serial.println("TX OK " + doorInfo);
   } else {
     Serial.println("TX FAIL " + doorInfo + ":" + String(sendStatus));
+    
+    // ✅ FIXED: Mark door offline on persistent TX failures
+    if (doorIndex >= 0) {
+      doors[doorIndex].isOnline = false;
+    }
   }
 }
 
 void onDataReceived(uint8_t *mac_addr, uint8_t *data, uint8_t len) {
   int doorIndex = findDoorByMAC(mac_addr);
   
-  if (doorIndex < 0 || len != sizeof(CompactMessage)) {
-    Serial.println("RX Invalid");
+  // ✅ FIXED: Enhanced validation
+  if (doorIndex < 0) {
+    Serial.println("RX Unknown MAC");
     return;
   }
   
+  if (len != sizeof(CompactMessage)) {
+    Serial.println("RX Invalid Size:" + String(len) + " expected:" + String(sizeof(CompactMessage)));
+    return;
+  }
+  
+  // ✅ FIXED: Safe memory handling
+  memset(&receiveBuffer, 0, sizeof(receiveBuffer));
   memcpy(&receiveBuffer, data, len);
+  
+  // ✅ FIXED: Ensure null termination
+  receiveBuffer.type[3] = '\0';
+  receiveBuffer.action[3] = '\0';
   
   doors[doorIndex].lastSeen = millis();
   doors[doorIndex].isOnline = true;
@@ -219,17 +240,18 @@ void forwardCommandToDoor(String serialNumber, String action) {
     return;
   }
   
-  if (!doors[doorIndex].isOnline) {
-    Serial.println("Door" + String(doors[doorIndex].doorId) + " (" + doors[doorIndex].doorType + ") Offline");
-    sendErrorResponse(serialNumber, action);
-    return;
-  }
-  
+  // ✅ REMOVED: Don't check isOnline for commands, let them try
   String compactAction = mapActionToCompact(action);
   
   memset(&sendBuffer, 0, sizeof(sendBuffer));
+  
+  // ✅ FIXED: Safe string copying
   strncpy(sendBuffer.type, "CMD", 3);
+  sendBuffer.type[3] = '\0';
+  
   strncpy(sendBuffer.action, compactAction.c_str(), 3);
+  sendBuffer.action[3] = '\0';
+  
   sendBuffer.angle = 0;
   sendBuffer.success = false;
   sendBuffer.ts = millis();
@@ -303,8 +325,14 @@ void sendHeartbeatToDoor(int doorIndex) {
   }
   
   memset(&sendBuffer, 0, sizeof(sendBuffer));
+  
+  // ✅ FIXED: Safe string copying
   strncpy(sendBuffer.type, "HBT", 3);
+  sendBuffer.type[3] = '\0';
+  
   strncpy(sendBuffer.action, "PNG", 3);  // "PING" shortened
+  sendBuffer.action[3] = '\0';
+  
   sendBuffer.success = true;
   sendBuffer.ts = millis();
   
@@ -325,6 +353,7 @@ void checkDoorStatus() {
     }
   }
 }
+
 // ✅ FIXED: Only heartbeat active doors with valid MAC addresses
 void loop() {
   // Handle MEGA commands
