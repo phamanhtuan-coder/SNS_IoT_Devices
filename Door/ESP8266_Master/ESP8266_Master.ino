@@ -35,12 +35,11 @@ DoorConfig doors[10] = {
   {"SERL27JUN2501JYR2RKVTBZ40JPF88WP", {0x84, 0x0d, 0x8e, 0xa4, 0x91, 0xa4}, 5, "SERVO", false, 0, 0, "CLD"},
   {"SERL27JUN2501JYR2RKVTXNCK1GB3HBZ", {0x84, 0x0d, 0x8e, 0xa4, 0x3a, 0xd2}, 6, "SERVO", false, 0, 0, "CLD"},
   {"SERL27JUN2501JYR2RKVS2P6XBVF1P2E", {0x84, 0x0d, 0x8e, 0xa4, 0x3b, 0x29}, 7, "SERVO", false, 0, 0, "CLD"},
-  // Door ID 8: ESP-01 servo door (missing MAC - to be updated)
   {"SERL27JUN2501JYR2RKVTH6PWR9ETXC2", {0x3c, 0x71, 0xbf, 0x39, 0x35, 0x47}, 8, "SERVO", false, 0, 0, "CLD"},  
-  // Door ID 9: ESP32 rolling door - FIXED MAC ADDRESS
+  // Door ID 9: ESP32 rolling door 
   {"SERL27JUN2501JYR2RKVVSBGRTM0TRFW", {0xb0, 0xb2, 0x1c, 0x97, 0xc6, 0xd0}, 9, "ROLLING", false, 0, 0, "CLD"},
-  // Door ID 10: Sliding door (placeholder - to be configured)
-  {"", {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, 10, "SLIDING", false, 0, 0, "CLD"}
+  // Door ID 10: Sliding door - NEED ACTUAL MAC ADDRESS
+  {"SERL27JUN2501JYR2RKVSQGM7E9S9D9A", {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, 10, "SLIDING", false, 0, 0, "CLD"}
 };
 const int TOTAL_DOORS = 10;  // Only count active doors (1-7 + 9), skip 8 and 10 for now
 
@@ -334,6 +333,33 @@ void sendErrorResponse(String serialNumber, String action) {
   json += "}";
   
   Serial.println("RESP:" + json);
+}
+
+void sendConfigResponse(String serialNumber, String configType, int value1, int value2, String doorType) {
+  String json = "{";
+  json += "\"d\":\"" + serialNumber + "\",";
+  json += "\"type\":\"" + configType + "\",";
+  json += "\"v1\":" + String(value1) + ",";
+  json += "\"v2\":" + String(value2) + ",";
+  json += "\"dt\":\"" + doorType + "\",";
+  json += "\"t\":" + String(millis());
+  json += "}";
+  
+  Serial.println("CFG:" + json);
+}
+
+void sendSlidingConfigResponse(String serialNumber, int closedRounds, int openRounds, bool pirEnabled) {
+  String json = "{";
+  json += "\"d\":\"" + serialNumber + "\",";
+  json += "\"type\":\"sliding_config\",";
+  json += "\"closed_rounds\":" + String(closedRounds) + ",";
+  json += "\"open_rounds\":" + String(openRounds) + ",";
+  json += "\"pir_enabled\":" + String(pirEnabled ? "true" : "false") + ",";
+  json += "\"dt\":\"SLIDING\",";
+  json += "\"t\":" + String(millis());
+  json += "}";
+  
+  Serial.println("CFG:" + json);
 }
 
 void sendHeartbeatToDoor(int doorIndex) {
