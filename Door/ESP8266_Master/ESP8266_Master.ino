@@ -37,7 +37,7 @@ DoorConfig doors[10] = {
   {"SERL27JUN2501JYR2RKVS2P6XBVF1P2E", {0x84, 0x0d, 0x8e, 0xa4, 0x3b, 0x29}, 7, "SERVO", false, 0, 0, "CLD"},
   // Door ID 8: ESP-01 servo door (missing MAC - to be updated)
   {"SERL27JUN2501JYR2RKVTH6PWR9ETXC2", {0x3c, 0x71, 0xbf, 0x39, 0x35, 0x47}, 8, "SERVO", false, 0, 0, "CLD"},  
-  // Door ID 9: ESP32 rolling door
+  // Door ID 9: ESP32 rolling door - FIXED MAC ADDRESS
   {"SERL27JUN2501JYR2RKVVSBGRTM0TRFW", {0xb0, 0xb2, 0x1c, 0x97, 0xc6, 0xd0}, 9, "ROLLING", false, 0, 0, "CLD"},
   // Door ID 10: Sliding door (placeholder - to be configured)
   {"", {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, 10, "SLIDING", false, 0, 0, "CLD"}
@@ -77,8 +77,9 @@ void setup() {
   
   Serial.println("ESP Gateway v4.2.1 - FIXED");
   Serial.println("ID:" + String(GATEWAY_ID));
-  Serial.println("Active Doors:" + String(TOTAL_DOORS) + " (7 Servo + 1 Rolling)");
-  Serial.println("Configured: ID8(Servo-NoMAC), ID10(Sliding-Placeholder)");
+  Serial.println("Active Doors:" + String(TOTAL_DOORS) + " (7 Servo + 1 Rolling + 1 Sliding)");
+  Serial.println("Door ID 9: Rolling (ESP32) - Active");
+  Serial.println("Door ID 10: Sliding (ESP8266) - Need MAC");
   Serial.println("MAC:" + WiFi.macAddress());
   
   setupESPNow();
@@ -202,7 +203,13 @@ void onDataReceived(uint8_t *mac_addr, uint8_t *data, uint8_t len) {
   Serial.println("RX " + doorInfo + ":" + msgType + ":" + action);
   
   if (msgType == "HBT") {
-    Serial.println("HBT " + doorInfo + " Angle:" + String(receiveBuffer.angle));
+    // Handle alive messages from ESP-01
+    if (action == "ALV") {
+      Serial.println("ALIVE " + doorInfo + " Angle:" + String(receiveBuffer.angle));
+      doors[doorIndex].isOnline = true;
+    } else {
+      Serial.println("HBT " + doorInfo + " Angle:" + String(receiveBuffer.angle));
+    }
     
   } else if (msgType == "ACK") {
     String fullAction = mapCompactToFull(action);
@@ -212,6 +219,27 @@ void onDataReceived(uint8_t *mac_addr, uint8_t *data, uint8_t len) {
     doors[doorIndex].doorState = action;
     String fullState = mapStateToFull(action);
     sendCompactStatus(doors[doorIndex].serialNumber, fullState, receiveBuffer.angle, doors[doorIndex].doorType);
+    
+  } else if (msgType == "CFG") {
+    // Handle configuration messages from doors
+    String doorType = doors[doorIndex].doorType;
+    if (action == "ANG" && doorType == "SERVO") {
+      // ESP-01 servo angles: closed_angle << 8 | open_angle
+      int closedAngle = (receiveBuffer.angle >> 8) & 0xFF;
+      int openAngle = receiveBuffer.angle & 0xFF;
+      sendConfigResponse(doors[doorIndex].serialNumber, "servo_angles", closedAngle, openAngle, doorType);
+    } else if (action == "RND" && doorType == "ROLLING") {
+      // ESP32 rolling rounds: closed_rounds << 8 | open_rounds  
+      int closedRounds = (receiveBuffer.angle >> 8) & 0xFF;
+      int openRounds = receiveBuffer.angle & 0xFF;
+      sendConfigResponse(doors[doorIndex].serialNumber, "rolling_rounds", closedRounds, openRounds, doorType);
+    } else if (action == "SLD" && doorType == "SLIDING") {
+      // ESP32 sliding config: pir_enabled | closed_rounds << 8 | open_rounds
+      bool pirEnabled = (receiveBuffer.angle & 0x8000) != 0;
+      int closedRounds = (receiveBuffer.angle >> 8) & 0x7F;
+      int openRounds = receiveBuffer.angle & 0xFF;
+      sendSlidingConfigResponse(doors[doorIndex].serialNumber, closedRounds, openRounds, pirEnabled);
+    }
   }
 }
 
@@ -378,7 +406,7 @@ void loop() {
   // ✅ FIXED: Heartbeat only doors with valid MAC addresses
   static unsigned long lastHeartbeat = 0;
   static int heartbeatIndex = 0;
-  // Only active door indices: 0,1,2,3,4,5,6,7,8 (skip door 9 - no MAC)
+  // All active door indices including rolling door: 0,1,2,3,4,5,6,7,8 (Door 9 now has MAC)
   static int activeDoorIndices[] = {0, 1, 2, 3, 4, 5, 6, 7, 8};
   static int numActiveDoors = 9;
   
