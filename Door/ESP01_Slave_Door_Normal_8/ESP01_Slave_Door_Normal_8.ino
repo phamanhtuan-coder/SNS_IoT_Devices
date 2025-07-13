@@ -1,17 +1,18 @@
+// ESP01 Slave - With SoftwareSerial Communication
 #include <ESP8266WiFi.h>
 #include <espnow.h>
 #include <EEPROM.h>
+#include <SoftwareSerial.h>
 
 #define EEPROM_SIZE 64
 #define ADDR_DOOR_STATE 0
-#define ADDR_SERVO_CLOSED_ANGLE 4
-#define ADDR_SERVO_OPEN_ANGLE 8
 #define ADDR_INIT_FLAG 12
 
 #define DOOR_ID 8
-#define OUTPUT_PIN 2
-#define DEFAULT_CLOSED_ANGLE 0
-#define DEFAULT_OPEN_ANGLE 180
+#define OUTPUT_PIN 2  // Will now be used for SoftwareSerial TX
+
+// Create software serial instance (TX only on GPIO2)
+SoftwareSerial commandSerial(NULL, OUTPUT_PIN); // TX only, no RX needed
 
 const char* SERIAL_NUMBER = "SERL27JUN2501JYR2RKVTH6PWR9ETXC2";
 uint8_t gatewayMAC[6] = {0x48, 0x3F, 0xDA, 0x1F, 0x4A, 0xA6};
@@ -26,11 +27,9 @@ struct __attribute__((packed)) CompactMessage {
 
 bool doorOpen = false;
 int servoAngle = 0;
-int servoClosedAngle = DEFAULT_CLOSED_ANGLE;
-int servoOpenAngle = DEFAULT_OPEN_ANGLE;
 unsigned long lastHeartbeat = 0;
 unsigned long lastStatusSent = 0;
-unsigned long lastConnectionCheck = 0;
+unsigned long lastCommand = 0;
 
 CompactMessage sendBuffer;
 CompactMessage receiveBuffer;
@@ -39,8 +38,8 @@ void setup() {
   Serial.begin(115200);
   delay(500);
   
-  pinMode(OUTPUT_PIN, OUTPUT);
-  digitalWrite(OUTPUT_PIN, HIGH);
+  // Initialize software serial for communication with UNO
+  commandSerial.begin(9600); // Lower baud rate for better reliability
   
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
@@ -62,49 +61,47 @@ void setup() {
     ESP.restart();
   }
   
-  Serial.println("D" + String(DOOR_ID) + " READY");
+  Serial.println("D" + String(DOOR_ID) + " READY - SoftwareSerial Mode");
   Serial.println("SN:" + String(SERIAL_NUMBER));
-  Serial.println("MAC:" + WiFi.macAddress());
   
   EEPROM.begin(EEPROM_SIZE);
   loadDoorState();
-  digitalWrite(OUTPUT_PIN, doorOpen ? LOW : HIGH);
   
   memset(&sendBuffer, 0, sizeof(sendBuffer));
   memset(&receiveBuffer, 0, sizeof(receiveBuffer));
   
   delay(1000);
-  sendEnhancedCapabilities();
+  sendSimpleOnline();
   lastHeartbeat = millis();
 }
 
 void onDataSent(uint8_t *mac_addr, uint8_t sendStatus) {
-  Serial.println(sendStatus == 0 ? "TX OK" : "TX FAIL");
+  Serial.println(sendStatus == 0 ? "TX_OK" : "TX_FAIL");
 }
 
 void onDataReceived(uint8_t *mac, uint8_t *data, uint8_t len) {
-  noInterrupts();
-  
-  if (len != sizeof(CompactMessage) || memcmp(mac, gatewayMAC, 6) != 0) {
-    interrupts();
+  // Command cooldown
+  if (millis() - lastCommand < 3000) {
+    Serial.println("CMD_COOLDOWN");
     return;
   }
   
-  CompactMessage localMsg;
-  memset(&localMsg, 0, sizeof(localMsg));
-  memcpy(&localMsg, data, len);
-  localMsg.type[3] = '\0';
-  localMsg.action[3] = '\0';
+  if (len != sizeof(CompactMessage) || memcmp(mac, gatewayMAC, 6) != 0) {
+    return;
+  }
   
-  interrupts();
+  // Quick memory copy without interrupts
+  memcpy(&receiveBuffer, data, len);
+  receiveBuffer.type[3] = '\0';
+  receiveBuffer.action[3] = '\0';
   
-  String msgType = String(localMsg.type);
-  String action = String(localMsg.action);
+  String msgType = String(receiveBuffer.type);
+  String action = String(receiveBuffer.action);
   
   Serial.println("RX:" + msgType + ":" + action);
   
   if (msgType == "CMD") {
-    memcpy(&receiveBuffer, &localMsg, sizeof(localMsg));
+    lastCommand = millis();
     handleCommand(action);
   } else if (msgType == "HBT") {
     lastHeartbeat = millis();
@@ -112,49 +109,49 @@ void onDataReceived(uint8_t *mac, uint8_t *data, uint8_t len) {
 }
 
 void handleCommand(String action) {
+  Serial.println("CMD:" + action);
+  
   bool wasOpen = doorOpen;
   
   if (action == "TGL") {
     doorOpen = !doorOpen;
-    servoAngle = doorOpen ? servoOpenAngle : servoClosedAngle;
-    digitalWrite(OUTPUT_PIN, doorOpen ? LOW : HIGH);
-    delay(100);
-    sendAckMessage(doorOpen ? "OPN" : "CLS", true);
+    servoAngle = doorOpen ? 180 : 0;
+    sendSerialCommand("D" + String(DOOR_ID) + ":" + String(doorOpen ? "1" : "0"));
     Serial.println("TGL->" + String(doorOpen ? "OPEN" : "CLOSED"));
     
   } else if (action == "OPN") {
-    if (!doorOpen) {
-      doorOpen = true;
-      servoAngle = servoOpenAngle;
-      digitalWrite(OUTPUT_PIN, LOW);
-      delay(100);
-      sendAckMessage("OPN", true);
-      Serial.println("OPEN");
-    } else {
-      sendAckMessage("OPN", true);
-    }
+    doorOpen = true;
+    servoAngle = 180;
+    sendSerialCommand("D" + String(DOOR_ID) + ":1");
+    Serial.println("OPEN_FORCE");
     
   } else if (action == "CLS") {
-    if (doorOpen) {
-      doorOpen = false;
-      servoAngle = servoClosedAngle;
-      digitalWrite(OUTPUT_PIN, HIGH);
-      delay(100);
-      sendAckMessage("CLS", true);
-      Serial.println("CLOSE");
-    } else {
-      sendAckMessage("CLS", true);
-    }
+    doorOpen = false;
+    servoAngle = 0;
+    sendSerialCommand("D" + String(DOOR_ID) + ":0");
+    Serial.println("CLOSE_FORCE");
     
   } else if (action == "CFG") {
     sendConfigMessage();
+    return;
   }
   
+  // Send ACK
+  sendAckMessage(doorOpen ? "OPN" : "CLS", true);
+  
+  // Save state
   if (wasOpen != doorOpen) {
     saveDoorState();
-    delay(200);
-    sendStatusMessage();
   }
+}
+
+void sendSerialCommand(String command) {
+  // Send command to UNO Receiver via SoftwareSerial
+  commandSerial.println(command);
+  Serial.println("SERIAL_SENT:" + command);
+  
+  // Add a small delay to ensure command is fully transmitted
+  delay(50);
 }
 
 void sendAckMessage(String action, bool success) {
@@ -165,8 +162,8 @@ void sendAckMessage(String action, bool success) {
   sendBuffer.success = success;
   sendBuffer.ts = millis();
   
-  delay(10);
   esp_now_send(gatewayMAC, (uint8_t*)&sendBuffer, sizeof(sendBuffer));
+  Serial.println("ACK:" + action);
 }
 
 void sendStatusMessage() {
@@ -178,20 +175,30 @@ void sendStatusMessage() {
   sendBuffer.success = true;
   sendBuffer.ts = millis();
   
-  delay(15);
   esp_now_send(gatewayMAC, (uint8_t*)&sendBuffer, sizeof(sendBuffer));
   lastStatusSent = millis();
+  Serial.println("STS:" + statusAction);
 }
 
 void sendConfigMessage() {
   memset(&sendBuffer, 0, sizeof(sendBuffer));
   strncpy(sendBuffer.type, "CFG", 3);
   strncpy(sendBuffer.action, "ANG", 3);
-  sendBuffer.angle = (servoClosedAngle << 8) | servoOpenAngle;
+  sendBuffer.angle = (0 << 8) | 180; // Closed angle | Open angle
   sendBuffer.success = true;
   sendBuffer.ts = millis();
   
-  delay(15);
+  esp_now_send(gatewayMAC, (uint8_t*)&sendBuffer, sizeof(sendBuffer));
+}
+
+void sendSimpleOnline() {
+  memset(&sendBuffer, 0, sizeof(sendBuffer));
+  strncpy(sendBuffer.type, "ONL", 3);
+  strncpy(sendBuffer.action, "RDY", 3);
+  sendBuffer.angle = DOOR_ID;
+  sendBuffer.success = true;
+  sendBuffer.ts = millis();
+  
   esp_now_send(gatewayMAC, (uint8_t*)&sendBuffer, sizeof(sendBuffer));
 }
 
@@ -203,34 +210,11 @@ void sendAliveMessage() {
   sendBuffer.success = true;
   sendBuffer.ts = millis();
   
-  delay(15);
   esp_now_send(gatewayMAC, (uint8_t*)&sendBuffer, sizeof(sendBuffer));
-}
-
-void sendDeviceOnline() {
-  memset(&sendBuffer, 0, sizeof(sendBuffer));
-  strncpy(sendBuffer.type, "ONL", 3);
-  strncpy(sendBuffer.action, "CAP", 3);
-  sendBuffer.angle = DOOR_ID;
-  sendBuffer.success = true;
-  sendBuffer.ts = millis();
-  
-  delay(15);
-  esp_now_send(gatewayMAC, (uint8_t*)&sendBuffer, sizeof(sendBuffer));
-}
-
-void sendEnhancedCapabilities() {
-  sendDeviceOnline();
-  delay(500);
-  sendConfigMessage();
-  delay(500);
-  sendStatusMessage();
 }
 
 void saveDoorState() {
   EEPROM.put(ADDR_DOOR_STATE, doorOpen);
-  EEPROM.put(ADDR_SERVO_CLOSED_ANGLE, servoClosedAngle);
-  EEPROM.put(ADDR_SERVO_OPEN_ANGLE, servoOpenAngle);
   EEPROM.put(ADDR_INIT_FLAG, 0xAA);
   EEPROM.commit();
 }
@@ -241,37 +225,33 @@ void loadDoorState() {
   
   if (initFlag == 0xAA) {
     EEPROM.get(ADDR_DOOR_STATE, doorOpen);
-    EEPROM.get(ADDR_SERVO_CLOSED_ANGLE, servoClosedAngle);
-    EEPROM.get(ADDR_SERVO_OPEN_ANGLE, servoOpenAngle);
-    
-    if (servoClosedAngle < 0 || servoClosedAngle > 180) servoClosedAngle = DEFAULT_CLOSED_ANGLE;
-    if (servoOpenAngle < 0 || servoOpenAngle > 180) servoOpenAngle = DEFAULT_OPEN_ANGLE;
-    
-    servoAngle = doorOpen ? servoOpenAngle : servoClosedAngle;
-    Serial.println("STATE LOADED");
+    servoAngle = doorOpen ? 180 : 0;
+    Serial.println("STATE_LOADED");
   } else {
     doorOpen = false;
-    servoClosedAngle = DEFAULT_CLOSED_ANGLE;
-    servoOpenAngle = DEFAULT_OPEN_ANGLE;
-    servoAngle = servoClosedAngle;
-    Serial.println("DEFAULT STATE");
+    servoAngle = 0;
+    Serial.println("DEFAULT_STATE");
     saveDoorState();
   }
 }
 
 void loop() {
-  if (millis() - lastStatusSent > 20000) {
+  // Send status every 30 seconds
+  if (millis() - lastStatusSent > 30000) {
     sendStatusMessage();
   }
   
+  // Send alive every 60 seconds
   static unsigned long lastAlive = 0;
-  if (millis() - lastAlive > 45000 && millis() - lastStatusSent > 10000) {
+  if (millis() - lastAlive > 60000) {
     sendAliveMessage();
     lastAlive = millis();
   }
   
-  if (millis() - lastConnectionCheck > 5000) {
-    if (millis() - lastHeartbeat > 120000) {
+  // Check heartbeat timeout (3 minutes)
+  static unsigned long lastConnectionCheck = 0;
+  if (millis() - lastConnectionCheck > 10000) {
+    if (millis() - lastHeartbeat > 180000) {
       Serial.println("RESTART");
       delay(1000);
       ESP.restart();
