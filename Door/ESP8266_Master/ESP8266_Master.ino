@@ -1,150 +1,102 @@
-#define FIRMWARE_VERSION "4.2.1"
-#define GATEWAY_ID "ESP_GATEWAY_002"
+#define FIRMWARE_VERSION "5.0.0"
+#define DEVICE_ID "ESP8266_DOOR_HUB_PCA9685_001"
 
 #include <ESP8266WiFi.h>
-#include <espnow.h>
+#include <Wire.h>
+#include <Adafruit_PWMServoDriver.h>
 #include <ArduinoJson.h>
 
-// ✅ OPTIMIZED: Compact message structure matching ESP-01 and ESP32
-struct CompactMessage {
-  char type[4];        // "CMD", "ACK", "HBT", "STS" - NULL terminated
-  char action[4];      // "OPN", "CLS", "TGL", "ALV", etc. - NULL terminated
-  int angle;           // Servo angle
-  bool success;        // Success flag
-  unsigned long ts;    // Timestamp
-} __attribute__((packed)); // Ensure consistent packing
+// ✅ I2C PCA9685 Servo Controller
+Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
 
-// ✅ UPDATED: Extended door configuration for 10 doors
+// ✅ Door Configuration (matching Mega device database)
 struct DoorConfig {
   String serialNumber;
-  uint8_t macAddress[6];
-  int doorId;
-  String doorType;     // "SERVO", "ROLLING", "SLIDING"
-  bool isOnline;
-  unsigned long lastSeen;
-  int currentAngle;
-  String doorState;
+  uint8_t channel;          // PCA9685 channel (0-15)
+  uint16_t minPulse;        // Minimum pulse width (150)
+  uint16_t maxPulse;        // Maximum pulse width (600)
+  uint16_t closedAngle;     // Closed position angle
+  uint16_t openAngle;       // Open position angle
+  bool isDualDoor;          // Is this a dual door setup
+  uint8_t secondChannel;    // Second servo channel for dual doors
+  bool enabled;             // Is this door enabled
+  String doorType;          // SERVO_PCA9685, DUAL_PCA9685
 };
 
-DoorConfig doors[10] = {
-  // Original 7 ESP-01 servo doors
-  {"SERL27JUN2501JYR2RKVVX08V40YMGTW", {0x84, 0x0D, 0x8E, 0xA4, 0x91, 0x58}, 1, "SERVO", false, 0, 0, "CLD"},
-  {"SERL27JUN2501JYR2RKVR0SC7SJ8P8DD", {0x84, 0x0D, 0x8E, 0xA4, 0x3b, 0xe0}, 2, "SERVO", false, 0, 0, "CLD"},
-  {"SERL27JUN2501JYR2RKVRNHS46VR6AS1", {0x3c, 0x71, 0xbf, 0x39, 0x31, 0x2a}, 3, "SERVO", false, 0, 0, "CLD"},
-  {"SERL27JUN2501JYR2RKVSE2RW7KQ4KMP", {0x84, 0x0d, 0x8e, 0xa4, 0x91, 0x9c}, 4, "SERVO", false, 0, 0, "CLD"},
-  {"SERL27JUN2501JYR2RKVTBZ40JPF88WP", {0x84, 0x0d, 0x8e, 0xa4, 0x91, 0xa4}, 5, "SERVO", false, 0, 0, "CLD"},
-  {"SERL27JUN2501JYR2RKVTXNCK1GB3HBZ", {0x84, 0x0d, 0x8e, 0xa4, 0x3a, 0xd2}, 6, "SERVO", false, 0, 0, "CLD"},
-  {"SERL27JUN2501JYR2RKVS2P6XBVF1P2E", {0x84, 0x0d, 0x8e, 0xa4, 0x3b, 0x29}, 7, "SERVO", false, 0, 0, "CLD"},
-  {"SERL27JUN2501JYR2RKVTH6PWR9ETXC2", {0x3c, 0x71, 0xbf, 0x39, 0x35, 0x47}, 8, "SERVO", false, 0, 0, "CLD"},  
-  // Door ID 9: ESP32 rolling door 
-  {"SERL27JUN2501JYR2RKVVSBGRTM0TRFW", {0xb0, 0xb2, 0x1c, 0x97, 0xc6, 0xd0}, 9, "ROLLING", false, 0, 0, "CLD"},
-  // Door ID 10: Sliding door - NEED ACTUAL MAC ADDRESS
-  {"SERL27JUN2501JYR2RKVSQGM7E9S9D9A", {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, 10, "SLIDING", false, 0, 0, "CLD"}
+// ✅ Door Database (matching Mega_Hub_Sensor.ino)
+DoorConfig doors[9] = {
+  {"SERL27JUN2501JYR2RKVVX08V40YMGTW", 0, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685"},
+  {"SERL27JUN2501JYR2RKVR0SC7SJ8P8DD", 1, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685"},
+  {"SERL27JUN2501JYR2RKVRNHS46VR6AS1", 2, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685"},
+  {"SERL27JUN2501JYR2RKVSE2RW7KQ4KMP", 3, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685"},
+  {"SERL27JUN2501JYR2RKVTBZ40JPF88WP", 4, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685"},
+  {"SERL27JUN2501JYR2RKVTXNCK1GB3HBZ", 5, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685"},
+  // Door 7: Dual door setup (channels 6 & 7)
+  {"SERL27JUN2501JYR2RKVS2P6XBVF1P2E", 6, 150, 600, 0, 90, true, 7, true, "DUAL_PCA9685"},
+  {"SERL27JUN2501JYR2RKVTH6PWR9ETXC2", 8, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685"},
+  {"SERL27JUN2501JYR2RKVVSBGRTM0TRFW", 9, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685"}
 };
-const int TOTAL_DOORS = 10;  // Only count active doors (1-7 + 9), skip 8 and 10 for now
 
-static CompactMessage sendBuffer;
-static CompactMessage receiveBuffer;
+// ✅ Door States
+enum DoorState {
+  CLOSED = 0,
+  OPENING = 1,
+  OPEN = 2,
+  CLOSING = 3,
+  ERROR = 4
+};
 
-// ✅ OPTIMIZED: Action mapping for compact commands
-String mapActionToCompact(String action) {
-  if (action == "open_door") return "OPN";
-  if (action == "close_door") return "CLS";
-  if (action == "toggle_door") return "TGL";
-  if (action == "OPN" || action == "CLS" || action == "TGL") return action;
-  return "UNK";
-}
+struct DoorStatus {
+  DoorState state;
+  uint16_t currentAngle;
+  bool isMoving;
+  unsigned long lastCommand;
+  String lastAction;
+  bool online;
+};
 
-String mapCompactToFull(String compact) {
-  if (compact == "OPN") return "open_door";
-  if (compact == "CLS") return "close_door"; 
-  if (compact == "TGL") return "toggle_door";
-  if (compact == "ALV") return "alive";
-  return compact;
-}
-
-String mapStateToFull(String compact) {
-  if (compact == "CLD") return "closed";
-  if (compact == "OPG") return "opening";
-  if (compact == "OPD") return "open";
-  if (compact == "CLG") return "closing";
-  return "unknown";
-}
+DoorStatus doorStates[9];
 
 void setup() {
   Serial.begin(115200);
-  delay(1500);
+  delay(2000);
   
-  Serial.println("ESP Gateway v4.2.1 - FIXED");
-  Serial.println("ID:" + String(GATEWAY_ID));
-  Serial.println("Active Doors:" + String(TOTAL_DOORS) + " (7 Servo + 1 Rolling + 1 Sliding)");
-  Serial.println("Door ID 9: Rolling (ESP32) - Active");
-  Serial.println("Door ID 10: Sliding (ESP8266) - Need MAC");
-  Serial.println("MAC:" + WiFi.macAddress());
+  Serial.println("ESP8266 Door Hub PCA9685 v5.0.0");
+  Serial.println("Device: " + String(DEVICE_ID));
+  Serial.println("Controlled by: Arduino Mega via Serial");
+  Serial.println("Doors: 9 servos (Door 7 = dual servo)");
   
-  setupESPNow();
+  // ✅ Initialize I2C and PCA9685
+  Wire.begin();
+  pwm.begin();
+  pwm.setPWMFreq(50);  // 50Hz for servos
+  delay(100);
   
-  // Initialize buffers
-  memset(&sendBuffer, 0, sizeof(sendBuffer));
-  memset(&receiveBuffer, 0, sizeof(receiveBuffer));
-  
-  Serial.println("Gateway Ready with Mixed Door Types");
-}
-
-void setupESPNow() {
-  WiFi.mode(WIFI_STA);
-  WiFi.disconnect();
-  wifi_set_channel(1);
-  wifi_set_sleep_type(NONE_SLEEP_T);
-  
-  if (esp_now_init() != 0) {
-    Serial.println("ESP-NOW Init FAIL");
-    delay(3000);
-    ESP.restart();
-  }
-  
-  esp_now_set_self_role(ESP_NOW_ROLE_COMBO);
-  esp_now_register_send_cb(onDataSent);
-  esp_now_register_recv_cb(onDataReceived);
-  
-  // Add peers for active doors only (skip doors with empty MAC)
-  int peersAdded = 0;
-  for (int i = 0; i < 10; i++) {  // Check all 10 door slots
-    // Skip doors with empty MAC address or empty serial
-    bool hasValidMAC = false;
-    for (int j = 0; j < 6; j++) {
-      if (doors[i].macAddress[j] != 0x00) {
-        hasValidMAC = true;
-        break;
+  // ✅ Initialize all doors to closed position
+  for (int i = 0; i < 9; i++) {
+    if (doors[i].enabled) {
+      moveServoToAngle(i, doors[i].closedAngle);
+      doorStates[i] = {CLOSED, doors[i].closedAngle, false, millis(), "INIT", true};
+      
+      if (doors[i].isDualDoor) {
+        moveSecondServoToAngle(i, doors[i].closedAngle);
       }
     }
-    
-    if (hasValidMAC && doors[i].serialNumber.length() > 0) {
-      int result = esp_now_add_peer(doors[i].macAddress, ESP_NOW_ROLE_COMBO, 1, NULL, 0);
-      if (result == 0) {
-        Serial.println("Door" + String(doors[i].doorId) + " (" + doors[i].doorType + ") Peer OK");
-        peersAdded++;
-      } else {
-        Serial.println("Door" + String(doors[i].doorId) + " (" + doors[i].doorType + ") Peer FAIL:" + String(result));
-      }
-    } else {
-      Serial.println("Door" + String(doors[i].doorId) + " (" + doors[i].doorType + ") Skipped (No MAC/Serial)");
-    }
   }
-  Serial.println("Total peers added: " + String(peersAdded));
+  
+  delay(1000);
+  Serial.println("DOOR_HUB_PCA9685_READY");
+  Serial.println("CHANNELS:9_doors_initialized");
+  
+  // Send initial status to Mega
+  sendAllDoorStatus();
+  
+  Serial.println("ESP8266 Door Hub Ready - Awaiting Mega commands");
 }
 
-int findDoorByMAC(uint8_t *mac_addr) {
-  for (int i = 0; i < 10; i++) {  // Check all 10 door slots
-    if (memcmp(mac_addr, doors[i].macAddress, 6) == 0) {
-      return i;
-    }
-  }
-  return -1;
-}
-
+// ✅ Find door by serial number
 int findDoorBySerial(String serialNumber) {
-  for (int i = 0; i < 10; i++) {  // Check all 10 door slots
+  for (int i = 0; i < 9; i++) {
     if (doors[i].serialNumber == serialNumber) {
       return i;
     }
@@ -152,315 +104,304 @@ int findDoorBySerial(String serialNumber) {
   return -1;
 }
 
-void onDataSent(uint8_t *mac_addr, uint8_t sendStatus) {
-  int doorIndex = findDoorByMAC(mac_addr);
-  String doorInfo = (doorIndex >= 0) ? 
-    ("Door" + String(doors[doorIndex].doorId) + "(" + doors[doorIndex].doorType + ")") : 
-    "Unknown";
+// ✅ Door Control Functions
+void openDoor(int doorIndex) {
+  if (doorIndex < 0 || doorIndex >= 9 || !doors[doorIndex].enabled) return;
   
-  if (sendStatus == 0) {
-    Serial.println("TX OK " + doorInfo);
+  if (doorStates[doorIndex].isMoving) {
+    Serial.println("[DOOR] " + String(doorIndex + 1) + " already moving");
+    return;
+  }
+  
+  Serial.println("[DOOR] Opening door " + String(doorIndex + 1) + " (Ch" + String(doors[doorIndex].channel) + ")");
+  
+  doorStates[doorIndex].state = OPENING;
+  doorStates[doorIndex].isMoving = true;
+  doorStates[doorIndex].lastAction = "OPEN";
+  doorStates[doorIndex].lastCommand = millis();
+  
+  // Move primary servo to open position
+  moveServoToAngle(doorIndex, doors[doorIndex].openAngle);
+  
+  // Move second servo if dual door
+  if (doors[doorIndex].isDualDoor) {
+    moveSecondServoToAngle(doorIndex, doors[doorIndex].openAngle);
+  }
+  
+  // Simulate movement time
+  delay(1000);
+  
+  doorStates[doorIndex].state = OPEN;
+  doorStates[doorIndex].currentAngle = doors[doorIndex].openAngle;
+  doorStates[doorIndex].isMoving = false;
+  
+  sendDoorResponse(doorIndex, "open_door", true);
+  sendDoorStatus(doorIndex);
+}
+
+void closeDoor(int doorIndex) {
+  if (doorIndex < 0 || doorIndex >= 9 || !doors[doorIndex].enabled) return;
+  
+  if (doorStates[doorIndex].isMoving) {
+    Serial.println("[DOOR] " + String(doorIndex + 1) + " already moving");
+    return;
+  }
+  
+  Serial.println("[DOOR] Closing door " + String(doorIndex + 1) + " (Ch" + String(doors[doorIndex].channel) + ")");
+  
+  doorStates[doorIndex].state = CLOSING;
+  doorStates[doorIndex].isMoving = true;
+  doorStates[doorIndex].lastAction = "CLOSE";
+  doorStates[doorIndex].lastCommand = millis();
+  
+  // Move primary servo to closed position
+  moveServoToAngle(doorIndex, doors[doorIndex].closedAngle);
+  
+  // Move second servo if dual door
+  if (doors[doorIndex].isDualDoor) {
+    moveSecondServoToAngle(doorIndex, doors[doorIndex].closedAngle);
+  }
+  
+  // Simulate movement time
+  delay(1000);
+  
+  doorStates[doorIndex].state = CLOSED;
+  doorStates[doorIndex].currentAngle = doors[doorIndex].closedAngle;
+  doorStates[doorIndex].isMoving = false;
+  
+  sendDoorResponse(doorIndex, "close_door", true);
+  sendDoorStatus(doorIndex);
+}
+
+void toggleDoor(int doorIndex) {
+  if (doorStates[doorIndex].state == CLOSED) {
+    openDoor(doorIndex);
   } else {
-    Serial.println("TX FAIL " + doorInfo + ":" + String(sendStatus));
-    
-    // ✅ FIXED: Mark door offline on persistent TX failures
-    if (doorIndex >= 0) {
-      doors[doorIndex].isOnline = false;
-    }
+    closeDoor(doorIndex);
   }
 }
 
-void onDataReceived(uint8_t *mac_addr, uint8_t *data, uint8_t len) {
-  int doorIndex = findDoorByMAC(mac_addr);
+// ✅ Servo Control Functions
+void moveServoToAngle(int doorIndex, uint16_t angle) {
+  uint16_t pulse = map(angle, 0, 180, doors[doorIndex].minPulse, doors[doorIndex].maxPulse);
+  pwm.setPWM(doors[doorIndex].channel, 0, pulse);
   
-  // ✅ FIXED: Enhanced validation
-  if (doorIndex < 0) {
-    Serial.println("RX Unknown MAC");
-    return;
-  }
-  
-  if (len != sizeof(CompactMessage)) {
-    Serial.println("RX Invalid Size:" + String(len) + " expected:" + String(sizeof(CompactMessage)));
-    return;
-  }
-  
-  // ✅ FIXED: Safe memory handling
-  memset(&receiveBuffer, 0, sizeof(receiveBuffer));
-  memcpy(&receiveBuffer, data, len);
-  
-  // ✅ FIXED: Ensure null termination
-  receiveBuffer.type[3] = '\0';
-  receiveBuffer.action[3] = '\0';
-  
-  doors[doorIndex].lastSeen = millis();
-  doors[doorIndex].isOnline = true;
-  doors[doorIndex].currentAngle = receiveBuffer.angle;
-  
-  String msgType = String(receiveBuffer.type);
-  String action = String(receiveBuffer.action);
-  String doorInfo = "Door" + String(doors[doorIndex].doorId) + "(" + doors[doorIndex].doorType + ")";
-  
-  Serial.println("RX " + doorInfo + ":" + msgType + ":" + action);
-  
-  if (msgType == "HBT") {
-    // Handle alive messages from ESP-01
-    if (action == "ALV") {
-      Serial.println("ALIVE " + doorInfo + " Angle:" + String(receiveBuffer.angle));
-      doors[doorIndex].isOnline = true;
-    } else {
-      Serial.println("HBT " + doorInfo + " Angle:" + String(receiveBuffer.angle));
-    }
-    
-  } else if (msgType == "ACK") {
-    String fullAction = mapCompactToFull(action);
-    sendCompactResponse(doors[doorIndex].serialNumber, fullAction, receiveBuffer.success, action, doors[doorIndex].doorType);
-    
-  } else if (msgType == "STS") {
-    doors[doorIndex].doorState = action;
-    String fullState = mapStateToFull(action);
-    sendCompactStatus(doors[doorIndex].serialNumber, fullState, receiveBuffer.angle, doors[doorIndex].doorType);
-    
-  } else if (msgType == "CFG") {
-    // Handle configuration messages from doors
-    String doorType = doors[doorIndex].doorType;
-    if (action == "ANG" && doorType == "SERVO") {
-      // ESP-01 servo angles: closed_angle << 8 | open_angle
-      int closedAngle = (receiveBuffer.angle >> 8) & 0xFF;
-      int openAngle = receiveBuffer.angle & 0xFF;
-      sendConfigResponse(doors[doorIndex].serialNumber, "servo_angles", closedAngle, openAngle, doorType);
-    } else if (action == "RND" && doorType == "ROLLING") {
-      // ESP32 rolling rounds: closed_rounds << 8 | open_rounds  
-      int closedRounds = (receiveBuffer.angle >> 8) & 0xFF;
-      int openRounds = receiveBuffer.angle & 0xFF;
-      sendConfigResponse(doors[doorIndex].serialNumber, "rolling_rounds", closedRounds, openRounds, doorType);
-    } else if (action == "SLD" && doorType == "SLIDING") {
-      // ESP32 sliding config: pir_enabled | closed_rounds << 8 | open_rounds
-      bool pirEnabled = (receiveBuffer.angle & 0x8000) != 0;
-      int closedRounds = (receiveBuffer.angle >> 8) & 0x7F;
-      int openRounds = receiveBuffer.angle & 0xFF;
-      sendSlidingConfigResponse(doors[doorIndex].serialNumber, closedRounds, openRounds, pirEnabled);
-    }
-  }
+  Serial.println("[SERVO] Door " + String(doorIndex + 1) + " Ch" + String(doors[doorIndex].channel) + 
+                " -> " + String(angle) + "° (pulse: " + String(pulse) + ")");
 }
 
-// ✅ OPTIMIZED: Send compact command to door (ESP-01 or ESP32)
-void forwardCommandToDoor(String serialNumber, String action) {
-  int doorIndex = findDoorBySerial(serialNumber);
+void moveSecondServoToAngle(int doorIndex, uint16_t angle) {
+  if (!doors[doorIndex].isDualDoor) return;
   
-  if (doorIndex < 0) {
-    Serial.println("Door Not Found:" + serialNumber);
-    sendErrorResponse(serialNumber, action);
-    return;
-  }
+  uint16_t pulse = map(angle, 0, 180, doors[doorIndex].minPulse, doors[doorIndex].maxPulse);
+  pwm.setPWM(doors[doorIndex].secondChannel, 0, pulse);
   
-  // Check if door has valid MAC address
-  bool hasValidMAC = false;
-  for (int j = 0; j < 6; j++) {
-    if (doors[doorIndex].macAddress[j] != 0x00) {
-      hasValidMAC = true;
-      break;
-    }
-  }
-  
-  if (!hasValidMAC) {
-    Serial.println("Door" + String(doors[doorIndex].doorId) + " (" + doors[doorIndex].doorType + ") No MAC Address");
-    sendErrorResponse(serialNumber, action);
-    return;
-  }
-  
-  // ✅ REMOVED: Don't check isOnline for commands, let them try
-  String compactAction = mapActionToCompact(action);
-  
-  memset(&sendBuffer, 0, sizeof(sendBuffer));
-  
-  // ✅ FIXED: Safe string copying
-  strncpy(sendBuffer.type, "CMD", 3);
-  sendBuffer.type[3] = '\0';
-  
-  strncpy(sendBuffer.action, compactAction.c_str(), 3);
-  sendBuffer.action[3] = '\0';
-  
-  sendBuffer.angle = 0;
-  sendBuffer.success = false;
-  sendBuffer.ts = millis();
-  
-  delay(5);
-  int result = esp_now_send(doors[doorIndex].macAddress, (uint8_t*)&sendBuffer, sizeof(sendBuffer));
-  
-  if (result == 0) {
-    Serial.println("CMD Sent Door" + String(doors[doorIndex].doorId) + " (" + doors[doorIndex].doorType + "):" + compactAction);
-  } else {
-    Serial.println("CMD FAIL Door" + String(doors[doorIndex].doorId) + " (" + doors[doorIndex].doorType + "):" + String(result));
-    sendErrorResponse(serialNumber, action);
-  }
+  Serial.println("[SERVO] Door " + String(doorIndex + 1) + " 2nd Ch" + String(doors[doorIndex].secondChannel) + 
+                " -> " + String(angle) + "° (pulse: " + String(pulse) + ")");
 }
 
-// ✅ OPTIMIZED: Compact response format for MEGA with door type info
-void sendCompactResponse(String serialNumber, String command, bool success, String compactResult, String doorType) {
-  // Create minimal JSON for MEGA
+// ✅ Communication Functions
+void sendDoorResponse(int doorIndex, String command, bool success) {
   String json = "{";
-  json += "\"s\":" + String(success ? "1" : "0") + ",";  // success -> s
-  json += "\"r\":\"" + compactResult + "\",";             // result -> r
-  json += "\"d\":\"" + serialNumber + "\",";             // deviceId -> d
-  json += "\"c\":\"" + command + "\",";                  // command -> c
-  json += "\"a\":" + String(receiveBuffer.angle) + ","; // angle -> a
-  json += "\"dt\":\"" + doorType + "\",";                // doorType -> dt
-  json += "\"t\":" + String(millis());                  // timestamp -> t
+  json += "\"s\":" + String(success ? "1" : "0") + ",";
+  json += "\"r\":\"" + String(success ? "OK" : "ERR") + "\",";
+  json += "\"d\":\"" + doors[doorIndex].serialNumber + "\",";
+  json += "\"c\":\"" + command + "\",";
+  json += "\"a\":" + String(doorStates[doorIndex].currentAngle) + ",";
+  json += "\"ch\":" + String(doors[doorIndex].channel) + ",";
+  json += "\"dual\":" + String(doors[doorIndex].isDualDoor ? "1" : "0") + ",";
+  json += "\"t\":" + String(millis());
   json += "}";
   
   Serial.println("RESP:" + json);
 }
 
-void sendCompactStatus(String serialNumber, String state, int angle, String doorType) {
+void sendDoorStatus(int doorIndex) {
+  String stateStr = "";
+  switch(doorStates[doorIndex].state) {
+    case CLOSED: stateStr = "closed"; break;
+    case OPENING: stateStr = "opening"; break;
+    case OPEN: stateStr = "open"; break;
+    case CLOSING: stateStr = "closing"; break;
+    case ERROR: stateStr = "error"; break;
+  }
+  
   String json = "{";
-  json += "\"d\":\"" + serialNumber + "\",";
-  json += "\"s\":\"" + state + "\",";
-  json += "\"a\":" + String(angle) + ",";
-  json += "\"dt\":\"" + doorType + "\",";
-  json += "\"o\":1,";  // online
+  json += "\"d\":\"" + doors[doorIndex].serialNumber + "\",";
+  json += "\"s\":\"" + stateStr + "\",";
+  json += "\"a\":" + String(doorStates[doorIndex].currentAngle) + ",";
+  json += "\"ch\":" + String(doors[doorIndex].channel) + ",";
+  json += "\"moving\":" + String(doorStates[doorIndex].isMoving ? "1" : "0") + ",";
+  json += "\"dual\":" + String(doors[doorIndex].isDualDoor ? "1" : "0") + ",";
+  json += "\"type\":\"" + doors[doorIndex].doorType + "\",";
+  json += "\"online\":1,";
   json += "\"t\":" + String(millis());
   json += "}";
   
   Serial.println("STS:" + json);
 }
 
-void sendErrorResponse(String serialNumber, String action) {
-  String json = "{";
-  json += "\"s\":0,";
-  json += "\"r\":\"ERROR\",";
-  json += "\"d\":\"" + serialNumber + "\",";
-  json += "\"c\":\"" + action + "\",";
-  json += "\"t\":" + String(millis());
-  json += "}";
-  
-  Serial.println("RESP:" + json);
-}
-
-void sendConfigResponse(String serialNumber, String configType, int value1, int value2, String doorType) {
-  String json = "{";
-  json += "\"d\":\"" + serialNumber + "\",";
-  json += "\"type\":\"" + configType + "\",";
-  json += "\"v1\":" + String(value1) + ",";
-  json += "\"v2\":" + String(value2) + ",";
-  json += "\"dt\":\"" + doorType + "\",";
-  json += "\"t\":" + String(millis());
-  json += "}";
-  
-  Serial.println("CFG:" + json);
-}
-
-void sendSlidingConfigResponse(String serialNumber, int closedRounds, int openRounds, bool pirEnabled) {
-  String json = "{";
-  json += "\"d\":\"" + serialNumber + "\",";
-  json += "\"type\":\"sliding_config\",";
-  json += "\"closed_rounds\":" + String(closedRounds) + ",";
-  json += "\"open_rounds\":" + String(openRounds) + ",";
-  json += "\"pir_enabled\":" + String(pirEnabled ? "true" : "false") + ",";
-  json += "\"dt\":\"SLIDING\",";
-  json += "\"t\":" + String(millis());
-  json += "}";
-  
-  Serial.println("CFG:" + json);
-}
-
-void sendHeartbeatToDoor(int doorIndex) {
-  if (doorIndex < 0 || doorIndex >= 10) return;
-  
-  // Skip doors without valid MAC or serial
-  bool hasValidMAC = false;
-  for (int j = 0; j < 6; j++) {
-    if (doors[doorIndex].macAddress[j] != 0x00) {
-      hasValidMAC = true;
-      break;
+void sendAllDoorStatus() {
+  Serial.println("[STATUS] Sending all door status to Mega...");
+  for (int i = 0; i < 9; i++) {
+    if (doors[i].enabled) {
+      sendDoorStatus(i);
+      delay(50);
     }
   }
-  
-  if (!hasValidMAC || doors[doorIndex].serialNumber.length() == 0) {
-    return;  // Skip heartbeat for inactive doors
-  }
-  
-  memset(&sendBuffer, 0, sizeof(sendBuffer));
-  
-  // ✅ FIXED: Safe string copying
-  strncpy(sendBuffer.type, "HBT", 3);
-  sendBuffer.type[3] = '\0';
-  
-  strncpy(sendBuffer.action, "PNG", 3);  // "PING" shortened
-  sendBuffer.action[3] = '\0';
-  
-  sendBuffer.success = true;
-  sendBuffer.ts = millis();
-  
-  delay(10);
-  int result = esp_now_send(doors[doorIndex].macAddress, (uint8_t*)&sendBuffer, sizeof(sendBuffer));
-  String doorInfo = "Door" + String(doors[doorIndex].doorId) + "(" + doors[doorIndex].doorType + ")";
-  Serial.println("HBT " + doorInfo + ":" + String(result == 0 ? "OK" : "FAIL"));
+  Serial.println("STATUS_COMPLETE");
 }
 
-void checkDoorStatus() {
-  unsigned long now = millis();
-  
-  for (int i = 0; i < 10; i++) {  // Check all 10 door slots
-    if (doors[i].isOnline && (now - doors[i].lastSeen > 90000)) {  // 90 seconds timeout
-      doors[i].isOnline = false;
-      String doorInfo = "Door" + String(doors[i].doorId) + "(" + doors[i].doorType + ")";
-      Serial.println(doorInfo + " Timeout");
-    }
-  }
-}
-
-// ✅ FIXED: Only heartbeat active doors with valid MAC addresses
-void loop() {
-  // Handle MEGA commands
-  if (Serial.available()) {
-    String cmd = Serial.readStringUntil('\n');
-    cmd.trim();
+// ✅ Configuration Functions
+void configureDoor(int doorIndex, String configData) {
+  // Parse basic config (can be expanded)
+  if (configData.indexOf("open_angle") >= 0) {
+    int angleStart = configData.indexOf("open_angle") + 11;
+    int angleEnd = configData.indexOf(",", angleStart);
+    if (angleEnd == -1) angleEnd = configData.length();
     
-    if (cmd.startsWith("CMD:")) {
-      String cmdData = cmd.substring(4);
-      
-      int colonIndex = cmdData.indexOf(':');
-      if (colonIndex > 0) {
-        String serialNumber = cmdData.substring(0, colonIndex);
-        String action = cmdData.substring(colonIndex + 1);
-        
-        Serial.println("RX CMD:" + serialNumber + "->" + action);
-        forwardCommandToDoor(serialNumber, action);
-      }
+    String angleStr = configData.substring(angleStart, angleEnd);
+    int angle = angleStr.toInt();
+    
+    if (angle >= 0 && angle <= 180) {
+      doors[doorIndex].openAngle = angle;
+      Serial.println("[CONFIG] Door " + String(doorIndex + 1) + " open angle: " + String(angle) + "°");
     }
   }
   
-  // ✅ FIXED: Heartbeat only doors with valid MAC addresses
-  static unsigned long lastHeartbeat = 0;
-  static int heartbeatIndex = 0;
-  // All active door indices including rolling door: 0,1,2,3,4,5,6,7,8 (Door 9 now has MAC)
-  static int activeDoorIndices[] = {0, 1, 2, 3, 4, 5, 6, 7, 8};
-  static int numActiveDoors = 9;
+  if (configData.indexOf("closed_angle") >= 0) {
+    int angleStart = configData.indexOf("closed_angle") + 13;
+    int angleEnd = configData.indexOf(",", angleStart);
+    if (angleEnd == -1) angleEnd = configData.length();
+    
+    String angleStr = configData.substring(angleStart, angleEnd);
+    int angle = angleStr.toInt();
+    
+    if (angle >= 0 && angle <= 180) {
+      doors[doorIndex].closedAngle = angle;
+      Serial.println("[CONFIG] Door " + String(doorIndex + 1) + " closed angle: " + String(angle) + "°");
+    }
+  }
   
-  if (millis() - lastHeartbeat > 8000) {  // Every 8 seconds
-    sendHeartbeatToDoor(activeDoorIndices[heartbeatIndex]);
-    heartbeatIndex = (heartbeatIndex + 1) % numActiveDoors;
+  sendDoorResponse(doorIndex, "configure_door", true);
+}
+
+void testDoor(int doorIndex) {
+  Serial.println("[TEST] Testing door " + String(doorIndex + 1));
+  
+  // Test sequence: closed -> open -> closed
+  moveServoToAngle(doorIndex, doors[doorIndex].closedAngle);
+  if (doors[doorIndex].isDualDoor) {
+    moveSecondServoToAngle(doorIndex, doors[doorIndex].closedAngle);
+  }
+  delay(1000);
+  
+  moveServoToAngle(doorIndex, doors[doorIndex].openAngle);
+  if (doors[doorIndex].isDualDoor) {
+    moveSecondServoToAngle(doorIndex, doors[doorIndex].openAngle);
+  }
+  delay(1000);
+  
+  moveServoToAngle(doorIndex, doors[doorIndex].closedAngle);
+  if (doors[doorIndex].isDualDoor) {
+    moveSecondServoToAngle(doorIndex, doors[doorIndex].closedAngle);
+  }
+  
+  doorStates[doorIndex].state = CLOSED;
+  doorStates[doorIndex].currentAngle = doors[doorIndex].closedAngle;
+  
+  sendDoorResponse(doorIndex, "test_door", true);
+  Serial.println("[TEST] Door " + String(doorIndex + 1) + " test complete");
+}
+
+// ✅ Command Processing
+void handleMegaCommand(String message) {
+  if (!message.startsWith("CMD:")) return;
+  
+  String cmdData = message.substring(4);
+  int colonIndex = cmdData.indexOf(':');
+  
+  if (colonIndex <= 0) {
+    Serial.println("[CMD] Invalid format: " + message);
+    return;
+  }
+  
+  String serialNumber = cmdData.substring(0, colonIndex);
+  String action = cmdData.substring(colonIndex + 1);
+  
+  int doorIndex = findDoorBySerial(serialNumber);
+  
+  if (doorIndex < 0) {
+    Serial.println("[CMD] Door not found: " + serialNumber);
+    return;
+  }
+  
+  Serial.println("[CMD] Door " + String(doorIndex + 1) + " (" + doors[doorIndex].doorType + "): " + action);
+  
+  doorStates[doorIndex].online = true;
+  doorStates[doorIndex].lastCommand = millis();
+  
+  if (action == "open_door") {
+    openDoor(doorIndex);
+  } 
+  else if (action == "close_door") {
+    closeDoor(doorIndex);
+  }
+  else if (action == "toggle_door") {
+    toggleDoor(doorIndex);
+  }
+  else if (action.startsWith("configure")) {
+    configureDoor(doorIndex, action);
+  }
+  else if (action == "test_door") {
+    testDoor(doorIndex);
+  }
+  else if (action == "get_status") {
+    sendDoorStatus(doorIndex);
+  }
+  else {
+    Serial.println("[CMD] Unknown action: " + action);
+    sendDoorResponse(doorIndex, action, false);
+  }
+}
+
+void loop() {
+  // Handle commands from Mega via Serial
+  if (Serial.available()) {
+    String command = Serial.readStringUntil('\n');
+    command.trim();
+    
+    if (command.length() > 0) {
+      handleMegaCommand(command);
+    }
+  }
+  
+  // Monitor door timeouts
+  for (int i = 0; i < 9; i++) {
+    if (doorStates[i].isMoving && (millis() - doorStates[i].lastCommand > 5000)) {
+      // Movement timeout - stop movement
+      doorStates[i].isMoving = false;
+      doorStates[i].state = ERROR;
+      Serial.println("[TIMEOUT] Door " + String(i + 1) + " movement timeout");
+      sendDoorStatus(i);
+    }
+  }
+  
+  // Periodic status update
+  static unsigned long lastStatusUpdate = 0;
+  if (millis() - lastStatusUpdate > 300000) { // Every 5 minutes
+    Serial.println("[HEALTH] ESP8266 Door Hub PCA9685 - " + String(millis() / 1000) + "s uptime");
+    Serial.println("         Free heap: " + String(ESP.getFreeHeap()) + " bytes");
+    Serial.println("         Doors: 9 servos (Door 7 = dual) via PCA9685");
+    lastStatusUpdate = millis();
+  }
+  
+  // Heartbeat to Mega
+  static unsigned long lastHeartbeat = 0;
+  if (millis() - lastHeartbeat > 60000) { // Every minute
+    Serial.println("[HEARTBEAT] Door Hub PCA9685 operational");
     lastHeartbeat = millis();
   }
   
-  static unsigned long lastStatusCheck = 0;
-  if (millis() - lastStatusCheck > 20000) {
-    checkDoorStatus();
-    lastStatusCheck = millis();
-  }
-  
-  // Status print
-  static unsigned long lastStatus = 0;
-  if (millis() - lastStatus > 60000) {
-    int onlineCount = 0;
-    for (int i = 0; i < 10; i++) {
-      if (doors[i].isOnline) onlineCount++;
-    }
-    Serial.println("STATUS Online:" + String(onlineCount) + "/9 active doors" +
-                   " Heap:" + String(ESP.getFreeHeap()));
-    lastStatus = millis();
-  }
-  
-  yield();
-  delay(5);
+  delay(50);
 }
