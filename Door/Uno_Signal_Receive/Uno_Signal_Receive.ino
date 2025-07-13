@@ -1,159 +1,170 @@
-// UNO Signal Receiver - Optimized Version
-#define ESP01_PIN_START 2  // Pins 2-9 for 8 doors
+// UNO Signal Receiver - SoftwareSerial Mode
+#include <SoftwareSerial.h>
+
+#define ESP01_RX_PIN 2  // Connect to ESP01's TX (GPIO2)
 #define NUM_DOORS 8
 
-// Global variables
-bool currentPinStates[NUM_DOORS] = {LOW};
-bool lastPinStates[NUM_DOORS] = {LOW};
-unsigned long lastCommandTime[NUM_DOORS] = {0};
-unsigned long lastStateChange[NUM_DOORS] = {0};
-unsigned long lastCheck = 0;
-unsigned long lastDebugPrint = 0;
-const unsigned long debounceDelay = 50; // Debounce time in ms
-const unsigned long commandCooldown = 1000; // Min time between commands
-const unsigned long debugInterval = 10000; // Print debug every 10 seconds (reduced)
+// Create SoftwareSerial instance to communicate with ESP01
+SoftwareSerial espSerial(ESP01_RX_PIN, -1); // RX only, no TX needed
 
-// Non-blocking serial communication
-const int MAX_BUFFER = 32;
-char serialBuffer[MAX_BUFFER];
-int bufferIndex = 0;
-unsigned long lastSerialActivity = 0;
+bool doorStates[NUM_DOORS] = {false};
+unsigned long lastCommandTime[NUM_DOORS] = {0};
+unsigned long lastDebugPrint = 0;
+unsigned long lastCheck = 0;
+
+const unsigned long commandCooldown = 1000;
+const unsigned long debugInterval = 15000;
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(115200);   // Communication with Servo Controller UNO
+  espSerial.begin(9600);  // Communication with ESP01
   
-  // Initialize all pins as inputs with PULL-UP
-  for (int i = 0; i < NUM_DOORS; i++) {
-    pinMode(ESP01_PIN_START + i, INPUT_PULLUP);
-    lastPinStates[i] = HIGH; // Start HIGH due to pull-up
-  }
+  // Initialize pins for monitoring
+  pinMode(ESP01_RX_PIN, INPUT_PULLUP);
   
-  Serial.println("UNO_RX:READY");
-  Serial.println("DirectCmd:8_DOORS:PINS_2-9:PULLUP");
-  Serial.println("DEBUG:REDUCED_OUTPUT_MODE");
+  Serial.println("UNO_RX:READY_SOFTWARESERIAL_MODE");
+  Serial.println("ESP01 RX Pin: " + String(ESP01_RX_PIN));
   
   delay(100);
-  printPinStates("INIT");
+  printDoorStates("INIT");
 }
 
 void loop() {
-  // Read pin states regularly
-  if (millis() - lastCheck > 10) {
-    checkDoorSignals();
+  // Check for commands from ESP01 via SoftwareSerial
+  if (espSerial.available()) {
+    String cmd = espSerial.readStringUntil('\n');
+    cmd.trim();
+    
+    if (cmd.length() > 0) {
+      Serial.println("ESP01_RX:" + cmd);
+      processCommand(cmd);
+    }
+  }
+  
+  // Check pin states periodically
+  if (millis() - lastCheck > 500) {
+    monitorPins();
     lastCheck = millis();
   }
   
-  // Reduced debug output - only every 10 seconds
+  // Debug output
   if (millis() - lastDebugPrint > debugInterval) {
-    printPinStates("STATUS");
+    printDoorStates("STATUS");
     lastDebugPrint = millis();
   }
   
-  // Non-blocking serial reading
-  while (Serial.available() > 0) {
-    char inChar = (char)Serial.read();
-    lastSerialActivity = millis();
-    
-    if (inChar == '\n') {
-      serialBuffer[bufferIndex] = '\0';
-      processSerialCommand(String(serialBuffer));
-      bufferIndex = 0;
-    } else if (bufferIndex < MAX_BUFFER - 1) {
-      serialBuffer[bufferIndex++] = inChar;
-    }
-  }
-  
-  // Serial timeout
-  if (bufferIndex > 0 && millis() - lastSerialActivity > 1000) {
-    bufferIndex = 0;
-  }
+  processSerial();
 }
 
-void checkDoorSignals() {
-  unsigned long currentTime = millis();
-  
-  for (int i = 0; i < NUM_DOORS; i++) {
-    // Read current state
-    bool newState = digitalRead(ESP01_PIN_START + i);
+void processCommand(String cmd) {
+  // Only process valid formatted commands (D1:1, D8:0, etc.)
+  if (cmd.startsWith("D") && cmd.indexOf(':') != -1) {
+    int colonPos = cmd.indexOf(':');
+    String doorPart = cmd.substring(1, colonPos);
+    String statePart = cmd.substring(colonPos + 1);
     
-    // Check for state change
-    if (newState != currentPinStates[i]) {
-      lastStateChange[i] = currentTime;
-      currentPinStates[i] = newState;
-    }
+    int doorNum = doorPart.toInt();
+    int state = statePart.toInt();
     
-    // If state is stable after debounce time
-    if ((currentTime - lastStateChange[i]) > debounceDelay) {
-      if (currentPinStates[i] != lastPinStates[i] && 
-          (currentTime - lastCommandTime[i]) > commandCooldown) {
-        
-        lastPinStates[i] = currentPinStates[i];
-        int doorNumber = i + 1;
-        int state = (currentPinStates[i] == LOW) ? 1 : 0;
-        
-        // Send command to Servo Controller
-        Serial.println("D" + String(doorNumber) + ":" + String(state));
-        
-        // Minimal logging - only state changes
-        Serial.println("DOOR" + String(doorNumber) + ":" + 
-                      (state == 1 ? "OPEN" : "CLOSE"));
-        
-        lastCommandTime[i] = currentTime;
+    if (doorNum >= 1 && doorNum <= NUM_DOORS && (state == 0 || state == 1)) {
+      // Command cooldown check
+      if (millis() - lastCommandTime[doorNum-1] < commandCooldown) {
+        Serial.println("D" + String(doorNum) + ":COOLDOWN");
+        return;
       }
+      
+      // Update state and forward to servo controller
+      doorStates[doorNum-1] = (state == 1);
+      lastCommandTime[doorNum-1] = millis();
+      
+      // Forward command to servo controller
+      Serial.println(cmd);
+      
+      // Log the action
+      String action = (state == 1) ? "OPEN" : "CLOSE";
+      Serial.println("DOOR" + String(doorNum) + ":" + action + ":" + 
+                    (state == 1 ? "OPEN" : "CLOSED") + " [SERIAL_CMD]");
     }
   }
 }
 
-void printPinStates(String label) {
+void monitorPins() {
+  // Monitor ESP01_RX_PIN for debug purposes
+  bool pinState = digitalRead(ESP01_RX_PIN);
+  static bool lastPinState = HIGH;
+  
+  if (pinState != lastPinState) {
+    Serial.println("ESP01_PIN:" + String(pinState ? "HIGH" : "LOW"));
+    lastPinState = pinState;
+  }
+}
+
+void printDoorStates(String label) {
   Serial.print(label + ":");
   for (int i = 0; i < NUM_DOORS; i++) {
-    bool pinState = digitalRead(ESP01_PIN_START + i);
     Serial.print("D" + String(i + 1) + ":");
-    Serial.print(pinState ? "H" : "L");
+    Serial.print(doorStates[i] ? "O" : "C");
     if (i < NUM_DOORS - 1) Serial.print(",");
   }
   Serial.println();
 }
 
-void processSerialCommand(String cmd) {
-  cmd.trim();
+void processSerial() {
+  static String inputString = "";
   
-  // Ignore servo controller messages
-  if (cmd.startsWith("ACK:") || 
-      cmd.startsWith("UNO_SERVO:") || 
-      cmd.startsWith("DirectCmd:") || 
-      cmd.startsWith("RESET:") ||
-      cmd == "") {
-    return;
-  }
-  
-  if (cmd == "TEST") {
-    runTestSequence();
-  }
-  else if (cmd == "DEBUG") {
-    printPinStates("MANUAL");
-  }
-  else if (cmd == "PINS") {
-    printDetailedPinInfo();
+  while (Serial.available() > 0) {
+    char inChar = (char)Serial.read();
+    
+    if (inChar == '\n') {
+      processSerialCommand(inputString);
+      inputString = "";
+    } else {
+      inputString += inChar;
+    }
   }
 }
 
-void printDetailedPinInfo() {
-  Serial.println("PIN_INFO:");
+void processSerialCommand(String cmd) {
+  cmd.trim();
+  
+  // Filter system messages
+  if (cmd.startsWith("ACK:") || cmd.startsWith("UNO_SERVO:") || 
+      cmd.startsWith("DirectCmd:") || cmd.startsWith("RESET:") || cmd == "") {
+    return;
+  }
+  
+  if (cmd == "DEBUG") {
+    printDoorStates("DEBUG");
+    for (int i = 0; i < NUM_DOORS; i++) {
+      Serial.println("D" + String(i + 1) + "_STATE:" + 
+                    String(doorStates[i] ? "OPEN" : "CLOSED") + 
+                    "|LAST_CMD:" + String((millis() - lastCommandTime[i]) / 1000) + "s_ago");
+    }
+  }
+  else if (cmd == "RESET") {
+    resetAllDoors();
+  }
+  else if (cmd == "TEST") {
+    runTestSequence();
+  }
+}
+
+void resetAllDoors() {
+  Serial.println("RESET:ALL_DOORS");
   for (int i = 0; i < NUM_DOORS; i++) {
-    bool pinState = digitalRead(ESP01_PIN_START + i);
-    Serial.println("D" + String(i + 1) + ":PIN" + String(ESP01_PIN_START + i) + 
-                  ":" + String(pinState ? "H" : "L"));
+    doorStates[i] = false;
+    lastCommandTime[i] = 0;
+    Serial.println("D" + String(i + 1) + ":0");
   }
 }
 
 void runTestSequence() {
-  Serial.println("TEST:START");
+  Serial.println("TEST:SERIAL_SEQUENCE");
   for (int i = 1; i <= NUM_DOORS; i++) {
     Serial.println("D" + String(i) + ":1");
-    delay(1000);
+    delay(1500);
     Serial.println("D" + String(i) + ":0");
     delay(1000);
   }
-  Serial.println("TEST:END");
+  Serial.println("TEST:COMPLETE");
 }
