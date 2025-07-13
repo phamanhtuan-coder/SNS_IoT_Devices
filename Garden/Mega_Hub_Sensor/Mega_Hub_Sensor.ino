@@ -890,20 +890,56 @@ void handleGardenMasterCommand(String message) {
 void handleDoorMasterMessage(String message) {
   if (message.length() == 0) return;
   
+  // CRITICAL: Add message validation
+  if (message.length() > 512) {
+    Serial.println("[ERROR] Message too long, dropping: " + String(message.length()));
+    return;
+  }
+  
   doorMasterConnected = true;
   lastDoorMessage = millis();
   
-  Serial.println("\n[DOOR_MASTER→MEGA] " + message);
+  // Clean the message-
+  message.trim();
   
-  if (message.startsWith("RESP:")) {
-    Serial.println("[DEBUG] Door response received");
-    handleDoorMasterResponse(message);
-  } else if (message.startsWith("STS:")) {
-    Serial.println("[DEBUG] Door status received");
+  // Validate JSON structure for STS messages
+  if (message.startsWith("STS:")) {
+    String jsonPart = message.substring(4);
+    
+    // Check for proper JSON structure
+    if (jsonPart.indexOf('{') == -1 || jsonPart.lastIndexOf('}') == -1) {
+      Serial.println("[ERROR] Malformed STS message: " + message);
+      return;
+    }
+    
+    // Check for concatenated messages
+    int firstClose = jsonPart.indexOf('}');
+    int secondOpen = jsonPart.indexOf('{', firstClose + 1);
+    
+    if (secondOpen != -1) {
+      Serial.println("[ERROR] Concatenated message detected, splitting...");
+      
+      // Process first message
+      String firstMsg = "STS:" + jsonPart.substring(0, firstClose + 1);
+      Serial.println("[SPLIT-1] " + firstMsg);
+      Serial1.println(firstMsg);
+      
+      // Process second message if complete
+      String secondMsg = jsonPart.substring(secondOpen);
+      if (secondMsg.indexOf('}') != -1) {
+        Serial.println("[SPLIT-2] STS:" + secondMsg);
+        Serial1.println("STS:" + secondMsg);
+      }
+      return;
+    }
+  }
+  
+  Serial.println("[HUB_MASTER→MEGA] " + message);
+  
+  // Forward valid messages
+  if (message.startsWith("RESP:") || message.startsWith("STS:")) {
     Serial1.println(message);
     Serial.println("[MEGA→SOCKET] " + message);
-  } else {
-    Serial.println("[DEBUG] Unknown door message type");
   }
 }
 
@@ -1069,7 +1105,7 @@ void printSystemStatus() {
 }
 
 void forwardCommand(String serialNumber, String action) {
-  Serial.println("\n[FORWARD] Processing command");
+  Serial.println("\n[FORWARD] Processing command for Hub Master");
   Serial.println("[FORWARD] Serial: " + serialNumber);
   Serial.println("[FORWARD] Action: " + action);
   
@@ -1096,16 +1132,16 @@ void forwardCommand(String serialNumber, String action) {
   devices[deviceIndex].lastAction = action;
   devices[deviceIndex].lastSeen = millis();
   
+  // NEW: Send command to Hub Master instead of ESP8266 Master
   String forwardCmd = "CMD:" + serialNumber + ":" + action;
   Serial2.println(forwardCmd);
   delay(10);
   
   commandsProcessed++;
   
-  Serial.println("[FORWARD] ✓ Sent to Door Master");
-  Serial.println("[MEGA→DOOR_MASTER] " + forwardCmd);
+  Serial.println("[FORWARD] ✓ Sent to Hub Master");
+  Serial.println("[MEGA→HUB_MASTER] " + forwardCmd);
 }
-
 int freeMemory() {
   extern int __heap_start, *__brkval;
   int v;
