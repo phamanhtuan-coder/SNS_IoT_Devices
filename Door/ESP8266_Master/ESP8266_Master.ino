@@ -51,7 +51,8 @@ String mapActionToCompact(String action) {
   if (action == "open_door") return "OPN";
   if (action == "close_door") return "CLS";
   if (action == "toggle_door") return "TGL";
-  return "UNK";  // Unknown
+  if (action == "OPN" || action == "CLS" || action == "TGL") return action;
+  return "UNK";
 }
 
 String mapCompactToFull(String compact) {
