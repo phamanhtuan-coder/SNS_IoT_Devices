@@ -8,7 +8,6 @@
 
 // ✅ I2C PCA9685 Servo Controller
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
-
 // ✅ Door Configuration (matching Mega device database)
 struct DoorConfig {
   String serialNumber;
@@ -31,21 +30,21 @@ DoorConfig doors[9] = {
   {"SERL27JUN2501JYR2RKVSE2RW7KQ4KMP", 3, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685"},
   {"SERL27JUN2501JYR2RKVTBZ40JPF88WP", 4, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685"},
   {"SERL27JUN2501JYR2RKVTXNCK1GB3HBZ", 5, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685"},
-  // Door 7: Dual door setup (channels 6 & 7)
   {"SERL27JUN2501JYR2RKVS2P6XBVF1P2E", 6, 150, 600, 0, 90, true, 7, true, "DUAL_PCA9685"},
   {"SERL27JUN2501JYR2RKVTH6PWR9ETXC2", 8, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685"},
   {"SERL27JUN2501JYR2RKVVSBGRTM0TRFW", 9, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685"}
 };
 
-// ✅ Door States
+// ✅ Door State Enum
 enum DoorState {
-  CLOSED = 0,
-  OPENING = 1,
-  OPEN = 2,
-  CLOSING = 3,
-  ERROR = 4
+  DOOR_CLOSED,
+  DOOR_OPENING,
+  DOOR_OPEN,
+  DOOR_CLOSING,
+  DOOR_ERROR
 };
 
+// ✅ Door Status Structure
 struct DoorStatus {
   DoorState state;
   uint16_t currentAngle;
@@ -76,7 +75,12 @@ void setup() {
   for (int i = 0; i < 9; i++) {
     if (doors[i].enabled) {
       moveServoToAngle(i, doors[i].closedAngle);
-      doorStates[i] = {CLOSED, doors[i].closedAngle, false, millis(), "INIT", true};
+      doorStates[i].state = DOOR_CLOSED;
+      doorStates[i].currentAngle = doors[i].closedAngle;
+      doorStates[i].isMoving = false;
+      doorStates[i].lastCommand = millis();
+      doorStates[i].lastAction = "INIT";
+      doorStates[i].online = true;
       
       if (doors[i].isDualDoor) {
         moveSecondServoToAngle(i, doors[i].closedAngle);
@@ -115,7 +119,7 @@ void openDoor(int doorIndex) {
   
   Serial.println("[DOOR] Opening door " + String(doorIndex + 1) + " (Ch" + String(doors[doorIndex].channel) + ")");
   
-  doorStates[doorIndex].state = OPENING;
+  doorStates[doorIndex].state = DOOR_OPENING;
   doorStates[doorIndex].isMoving = true;
   doorStates[doorIndex].lastAction = "OPEN";
   doorStates[doorIndex].lastCommand = millis();
@@ -131,7 +135,7 @@ void openDoor(int doorIndex) {
   // Simulate movement time
   delay(1000);
   
-  doorStates[doorIndex].state = OPEN;
+  doorStates[doorIndex].state = DOOR_OPEN;
   doorStates[doorIndex].currentAngle = doors[doorIndex].openAngle;
   doorStates[doorIndex].isMoving = false;
   
@@ -149,7 +153,7 @@ void closeDoor(int doorIndex) {
   
   Serial.println("[DOOR] Closing door " + String(doorIndex + 1) + " (Ch" + String(doors[doorIndex].channel) + ")");
   
-  doorStates[doorIndex].state = CLOSING;
+  doorStates[doorIndex].state = DOOR_CLOSING;
   doorStates[doorIndex].isMoving = true;
   doorStates[doorIndex].lastAction = "CLOSE";
   doorStates[doorIndex].lastCommand = millis();
@@ -165,7 +169,7 @@ void closeDoor(int doorIndex) {
   // Simulate movement time
   delay(1000);
   
-  doorStates[doorIndex].state = CLOSED;
+  doorStates[doorIndex].state = DOOR_CLOSED;
   doorStates[doorIndex].currentAngle = doors[doorIndex].closedAngle;
   doorStates[doorIndex].isMoving = false;
   
@@ -174,7 +178,7 @@ void closeDoor(int doorIndex) {
 }
 
 void toggleDoor(int doorIndex) {
-  if (doorStates[doorIndex].state == CLOSED) {
+  if (doorStates[doorIndex].state == DOOR_CLOSED) {
     openDoor(doorIndex);
   } else {
     closeDoor(doorIndex);
@@ -219,11 +223,11 @@ void sendDoorResponse(int doorIndex, String command, bool success) {
 void sendDoorStatus(int doorIndex) {
   String stateStr = "";
   switch(doorStates[doorIndex].state) {
-    case CLOSED: stateStr = "closed"; break;
-    case OPENING: stateStr = "opening"; break;
-    case OPEN: stateStr = "open"; break;
-    case CLOSING: stateStr = "closing"; break;
-    case ERROR: stateStr = "error"; break;
+    case DOOR_CLOSED: stateStr = "closed"; break;
+    case DOOR_OPENING: stateStr = "opening"; break;
+    case DOOR_OPEN: stateStr = "open"; break;
+    case DOOR_CLOSING: stateStr = "closing"; break;
+    case DOOR_ERROR: stateStr = "error"; break;
   }
   
   String json = "{";
@@ -307,7 +311,7 @@ void testDoor(int doorIndex) {
     moveSecondServoToAngle(doorIndex, doors[doorIndex].closedAngle);
   }
   
-  doorStates[doorIndex].state = CLOSED;
+  doorStates[doorIndex].state = DOOR_CLOSED;
   doorStates[doorIndex].currentAngle = doors[doorIndex].closedAngle;
   
   sendDoorResponse(doorIndex, "test_door", true);
@@ -381,7 +385,7 @@ void loop() {
     if (doorStates[i].isMoving && (millis() - doorStates[i].lastCommand > 5000)) {
       // Movement timeout - stop movement
       doorStates[i].isMoving = false;
-      doorStates[i].state = ERROR;
+      doorStates[i].state = DOOR_ERROR;
       Serial.println("[TIMEOUT] Door " + String(i + 1) + " movement timeout");
       sendDoorStatus(i);
     }
