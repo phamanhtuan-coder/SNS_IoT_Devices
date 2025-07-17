@@ -48,19 +48,20 @@ struct DoorConfig {
   uint8_t secondChannel;    // Second servo channel for dual doors
   bool enabled;             // Is this door enabled
   String doorType;          // SERVO_PCA9685, DUAL_PCA9685
+  bool isReversed;          // FIXED: Flag for reversed servos
 };
 
-// Door Database
+// Door Database - FIXED: Added reversed servo flag for doors 1, 5, 6, 7A
 DoorConfig doors[9] = {
-  {"SERL27JUN2501JYR2RKVVX08V40YMGTW", 0, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685"},
-  {"SERL27JUN2501JYR2RKVR0SC7SJ8P8DD", 1, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685"},
-  {"SERL27JUN2501JYR2RKVRNHS46VR6AS1", 2, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685"},
-  {"SERL27JUN2501JYR2RKVSE2RW7KQ4KMP", 3, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685"},
-  {"SERL27JUN2501JYR2RKVTBZ40JPF88WP", 4, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685"},
-  {"SERL27JUN2501JYR2RKVTXNCK1GB3HBZ", 5, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685"},
-  {"SERL27JUN2501JYR2RKVS2P6XBVF1P2E", 6, 150, 600, 0, 90, true, 7, true, "DUAL_PCA9685"},
-  {"SERL27JUN2501JYR2RKVTH6PWR9ETXC2", 8, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685"},
-  {"SERL29JUN2501JYXECBS834760VJSFN5", 9, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685"}
+  {"SERL27JUN2501JYR2RKVVX08V40YMGTW", 0, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685", false},      // Door 1 - Normal
+  {"SERL27JUN2501JYR2RKVR0SC7SJ8P8DD", 1, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685", true},       // Door 2 - REVERSED
+  {"SERL27JUN2501JYR2RKVRNHS46VR6AS1", 2, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685", false},      // Door 3 - Normal
+  {"SERL27JUN2501JYR2RKVSE2RW7KQ4KMP", 3, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685", false},      // Door 4 - Normal
+  {"SERL27JUN2501JYR2RKVTBZ40JPF88WP", 4, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685", true},       // Door 5 - REVERSED
+  {"SERL27JUN2501JYR2RKVTXNCK1GB3HBZ", 5, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685", true},       // Door 6 - REVERSED
+  {"SERL27JUN2501JYR2RKVS2P6XBVF1P2E", 6, 150, 600, 0, 90, true, 7, true, "DUAL_PCA9685", true},         // Door 7A - REVERSED (dual door)
+  {"SERL27JUN2501JYR2RKVTH6PWR9ETXC2", 8, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685", false},      // Door 8 - Normal
+  {"SERL29JUN2501JYXECBS834760VJSFN5", 9, 150, 600, 0, 90, false, 0, true, "SERVO_PCA9685", false}       // Door 9 - Normal (Hub itself)
 };
 
 // Door State Enum
@@ -93,6 +94,8 @@ void setup() {
   
   Serial.println("ESP8266 Door Hub PCA9685 v5.0.2");
   Serial.println("Device: " + String(DEVICE_ID));
+  Serial.println("FIXED: Reversed servos use (180-angle) calculation");
+  Serial.println("Reversed doors: 2,5,6,7A (indexes 1,4,5,6)");
   
   // Initialize EEPROM
   EEPROM.begin(EEPROM_SIZE);
@@ -498,13 +501,16 @@ void toggleDoor(int doorIndex) {
 }
 
 void moveServoToAngle(int doorIndex, uint16_t angle) {
-  uint16_t pulse = map(angle, 0, 180, doors[doorIndex].minPulse, doors[doorIndex].maxPulse);
+  // FIXED: Invert for servos with top-mounted axis (different physical orientation)
+  uint16_t actualAngle = doors[doorIndex].isReversed ? (90 - angle) : angle;
+  uint16_t pulse = map(actualAngle, 0, 180, doors[doorIndex].minPulse, doors[doorIndex].maxPulse);
   pwm.setPWM(doors[doorIndex].channel, 0, pulse);
 }
 
 void moveSecondServoToAngle(int doorIndex, uint16_t angle) {
   if (!doors[doorIndex].isDualDoor) return;
-  uint16_t pulse = map(angle, 0, 180, doors[doorIndex].minPulse, doors[doorIndex].maxPulse);
+  uint16_t actualAngle = doors[doorIndex].isReversed ? (90 - angle) : angle;
+  uint16_t pulse = map(actualAngle, 0, 180, doors[doorIndex].minPulse, doors[doorIndex].maxPulse);
   pwm.setPWM(doors[doorIndex].secondChannel, 0, pulse);
 }
 
@@ -731,6 +737,7 @@ void loop() {
     Serial.println("[HEALTH] Free heap: " + String(ESP.getFreeHeap()) + " bytes");
     Serial.println("         Hub Type: ESP8266 PCA9685 Door Hub");
     Serial.println("         Managed Doors: 8 servos (Door 7 = dual)");
+    Serial.println("         FIXED: Reversed servos (1,5,6,7A) corrected");
     Serial.println("         WiFi: " + String(WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected"));
     if (WiFi.status() == WL_CONNECTED) {
       Serial.println("         Signal: " + String(WiFi.RSSI()) + " dBm");
