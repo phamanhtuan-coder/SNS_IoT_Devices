@@ -1,5 +1,5 @@
 // ========================================
-// ARDUINO MEGA GARDEN HUB - INTEGRATED SENSORS & DISPLAY
+// ARDUINO MEGA GARDEN HUB v3.3.0 - 4x4 KEYPAD VERSION
 // ========================================
 #include <DHT.h>
 #include <Wire.h>
@@ -7,15 +7,14 @@
 #include <LiquidCrystal_I2C.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <Keypad.h>
 
-#define FIRMWARE_VERSION "3.0.0"
-#define HUB_ID "MEGA_HUB_GARDEN_INTEGRATED_001"
+#define FIRMWARE_VERSION "3.3.0"
+#define HUB_ID "MEGA_HUB_GARDEN_KEYPAD"
 
 // ===== ARDUINO MEGA CENTRAL HUB =====
 // Serial0 (0,1): Debug Output / USB
-// Serial1 (18,19): ESP8266 Socket Hub
-// Serial2 (16,17): ESP8266 Door Hub (PCA9685)
-// Serial3: REMOVED - No longer needed
+// Serial1 (18,19): ESP8266 Socket Hub (Garden Gateway)
 
 // ===== GARDEN SENSOR PINS =====
 #define DHT_PIN 22
@@ -23,58 +22,74 @@
 #define WATER_SENSOR_PIN A0
 #define LIGHT_SENSOR_PIN 24
 #define SOIL_MOISTURE_PIN A2
-#define PUMP_RELAY_PIN 23
 
 // ===== RGB LED PINS (Garden Status) =====
 #define RGB_RED_PIN 5
 #define RGB_GREEN_PIN 6
 #define RGB_BLUE_PIN 7
 
-// ===== I2C DISPLAY PINS (Arduino Mega) =====
-// SCL: Pin 21 (Clock)
-// SDA: Pin 20 (Data)
-// Both OLED and LCD share the same I2C bus
-
 // ===== I2C DISPLAY ADDRESSES =====
-#define LCD_I2C_ADDRESS 0x27    // LCD 16x2 I2C address (could be 0x3F)
-#define OLED_I2C_ADDRESS 0x3C   // OLED 0.96" I2C address (could be 0x3D)
+#define LCD_I2C_ADDRESS 0x27
+#define OLED_I2C_ADDRESS 0x3C
+#define RTC_I2C_ADDRESS 0x68  // DS3231 default
 #define OLED_WIDTH 128
 #define OLED_HEIGHT 64
 
-// ===== 8-CHANNEL RELAY PINS (Active HIGH) =====
-#define RELAY_1_PIN 30  // Fan control
-#define RELAY_2_PIN 31  // Alarm control
-#define RELAY_3_PIN 32  // Light 1
-#define RELAY_4_PIN 33  // Light 2
-#define RELAY_5_PIN 34  // Pump 2 (backup)
-#define RELAY_6_PIN 35  // Heater
-#define RELAY_7_PIN 36  // Cooler/Fan 2
-#define RELAY_8_PIN 37  // Reserve
+// ===== 10 RELAY PINS =====
+#define RELAY_1_PIN 30   // Fan (5V LOW)
+#define RELAY_2_PIN 31   // Buzzer (5V LOW)
+#define RELAY_3_PIN 32   // LED (5V LOW)
+#define RELAY_4_PIN 33   // LED (5V LOW)
+#define RELAY_5_PIN 34   // LED (5V LOW)
+#define RELAY_6_PIN 35   // LED (5V LOW)
+#define RELAY_7_PIN 36   // LED 220V (5V LOW)
+#define RELAY_8_PIN 37   // LED 220V (5V LOW)
+#define RELAY_9_PIN 23   // Pump (5V HIGH - separate board)
+#define RELAY_10_PIN 38  // Reserve (5V LOW)
 
-// ===== RELAY STATUS LED PINS (Individual LED for each relay) =====
-#define RELAY_LED_1 44  // Fan LED
-#define RELAY_LED_2 45  // Alarm LED
-#define RELAY_LED_3 46  // Light 1 LED
-#define RELAY_LED_4 47  // Light 2 LED
-#define RELAY_LED_5 48  // Pump 2 LED
-#define RELAY_LED_6 49  // Heater LED
-#define RELAY_LED_7 50  // Cooler LED
-#define RELAY_LED_8 51  // Reserve LED
+// ===== 4x4 KEYPAD CONFIGURATION =====
+const byte KEYPAD_ROWS = 4;
+const byte KEYPAD_COLS = 4;
 
-// ===== FUTURE TOUCH SENSOR/SWITCH PINS (Local Relay Control) =====
-// Freed up pins 38-43 from LCD, now available for more sensors/expansion
-#define TOUCH_1_PIN 25  // Fan touch switch
-#define TOUCH_2_PIN 26  // Alarm reset switch
-#define TOUCH_3_PIN 27  // Light 1 switch
-#define TOUCH_4_PIN 28  // Light 2 switch
-#define TOUCH_5_PIN 29  // Pump 2 switch
-#define TOUCH_6_PIN A3  // Heater switch
-#define TOUCH_7_PIN A4  // Cooler switch
-#define TOUCH_8_PIN A5  // Reserve switch
+// Keypad layout - maps to relay indices 0-9
+char keypadLayout[KEYPAD_ROWS][KEYPAD_COLS] = {
+  {'1','2','3','A'},  // Keys 1,2,3 -> Relays 0,1,2
+  {'4','5','6','B'},  // Keys 4,5,6 -> Relays 3,4,5
+  {'7','8','9','C'},  // Keys 7,8,9 -> Relays 6,7,8
+  {'*','0','#','D'}   // Key 0 -> Relay 9, *, #, A-D for special functions
+};
 
-// ===== ADDITIONAL EXPANSION PINS (Available) =====
-// Pins 38-43: Now free for more sensors, actuators, or I/O
-// Could be used for: more touch sensors, encoders, additional relays, etc.
+// Keypad pin connections (update these to your actual wiring)
+byte keypadRowPins[KEYPAD_ROWS] = {25, 26, 27, 28};    // Rows R1-R4
+byte keypadColPins[KEYPAD_COLS] = {29, 44, 45, 46};    // Columns C1-C4
+
+// Key mapping to relay indices
+struct KeyMapping {
+  char key;
+  int relayIndex;
+  String function;
+};
+
+KeyMapping keyMappings[] = {
+  {'1', 0, "Fan"},
+  {'2', 1, "Buzzer"},
+  {'3', 2, "LED1"},
+  {'4', 3, "LED2"},
+  {'5', 4, "LED3"},
+  {'6', 5, "LED4"},
+  {'7', 6, "LED220V1"},
+  {'8', 7, "LED220V2"},
+  {'9', 8, "Pump"},
+  {'0', 9, "Reserve"},
+  {'A', -1, "Auto Water Toggle"},
+  {'B', -1, "Auto Light Toggle"},
+  {'C', -1, "Auto Fan Toggle"},
+  {'D', -1, "Emergency Stop"},
+  {'*', -1, "System Status"},
+  {'#', -1, "All Relays Off"}
+};
+
+const int TOTAL_KEY_MAPPINGS = sizeof(keyMappings) / sizeof(KeyMapping);
 
 // ===== RGB STATUS COLORS =====
 enum GardenStatus {
@@ -92,35 +107,38 @@ DHT dht(DHT_PIN, DHT_TYPE);
 RTC_DS3231 rtc;
 LiquidCrystal_I2C lcd(LCD_I2C_ADDRESS, 16, 2);
 Adafruit_SSD1306 oled(OLED_WIDTH, OLED_HEIGHT, &Wire, -1);
+Keypad keypad = Keypad(makeKeymap(keypadLayout), keypadRowPins, keypadColPins, KEYPAD_ROWS, KEYPAD_COLS);
 
 // ===== RELAY DEVICE DATA =====
 struct RelayDevice {
   String serialNumber;
   String deviceName;
   int relayPin;
-  int statusLedPin;
-  int touchPin;
+  char keypadKey;
   bool isOn;
   bool canToggle;
-  bool fireOverride;
-  bool localControl;  // Enable local touch control
+  bool activeHigh;  // true for HIGH trigger, false for LOW trigger
+  bool localControl;
   unsigned long lastToggle;
-  unsigned long lastTouchTime;
+  unsigned long lastKeyPress;
   String status;
+  bool powerSafeMode; // Prevent simultaneous high power relay activation
 };
 
-RelayDevice relayDevices[8] = {
-  { "RELAY27JUN2501FAN001CONTROL001", "Fan", RELAY_1_PIN, RELAY_LED_1, TOUCH_1_PIN, false, true, false, true, 0, 0, "off" },
-  { "RELAY27JUN2501ALARM01CONTROL01", "Alarm", RELAY_2_PIN, RELAY_LED_2, TOUCH_2_PIN, false, true, true, true, 0, 0, "off" },
-  { "RELAY27JUN2501LIGHT001CONTROL1", "Light1", RELAY_3_PIN, RELAY_LED_3, TOUCH_3_PIN, false, true, false, true, 0, 0, "off" },
-  { "RELAY27JUN2501LIGHT002CONTROL1", "Light2", RELAY_4_PIN, RELAY_LED_4, TOUCH_4_PIN, false, true, false, true, 0, 0, "off" },
-  { "RELAY27JUN2501PUMP002CONTROL01", "Pump2", RELAY_5_PIN, RELAY_LED_5, TOUCH_5_PIN, false, true, false, false, 0, 0, "off" },
-  { "RELAY27JUN2501HEATER1CONTROL01", "Heater", RELAY_6_PIN, RELAY_LED_6, TOUCH_6_PIN, false, true, false, true, 0, 0, "off" },
-  { "RELAY27JUN2501COOLER1CONTROL01", "Cooler", RELAY_7_PIN, RELAY_LED_7, TOUCH_7_PIN, false, true, false, true, 0, 0, "off" },
-  { "RELAY27JUN2501RESERVE8CONTROL1", "Reserve", RELAY_8_PIN, RELAY_LED_8, TOUCH_8_PIN, false, true, false, false, 0, 0, "off" }
+RelayDevice relayDevices[10] = {
+  { "RELAY27JUN2501FAN001CONTROL001", "Fan", RELAY_1_PIN, '1', false, true, false, true, 0, 0, "off", false },
+  { "RELAY27JUN2501BUZZER1CONTROL01", "Buzzer", RELAY_2_PIN, '2', false, true, false, true, 0, 0, "off", false },
+  { "RELAY27JUN2501LED001CONTROL001", "LED1", RELAY_3_PIN, '3', false, true, false, true, 0, 0, "off", false },
+  { "RELAY27JUN2501LED002CONTROL001", "LED2", RELAY_4_PIN, '4', false, true, false, true, 0, 0, "off", false },
+  { "RELAY27JUN2501LED003CONTROL001", "LED3", RELAY_5_PIN, '5', false, true, false, true, 0, 0, "off", false },
+  { "RELAY27JUN2501LED004CONTROL001", "LED4", RELAY_6_PIN, '6', false, true, false, true, 0, 0, "off", false },
+  { "RELAY27JUN2501LED220V7CONTROL1", "LED220V1", RELAY_7_PIN, '7', false, true, false, true, 0, 0, "off", true },
+  { "RELAY27JUN2501LED220V8CONTROL1", "LED220V2", RELAY_8_PIN, '8', false, true, false, true, 0, 0, "off", true },
+  { "RELAY27JUN2501PUMP9CONTROL001", "Pump", RELAY_9_PIN, '9', false, true, true, true, 0, 0, "off", true },
+  { "RELAY27JUN2501RESERVE10CTRL01", "Reserve", RELAY_10_PIN, '0', false, true, false, false, 0, 0, "off", false }
 };
 
-const int TOTAL_RELAY_DEVICES = 8;
+const int TOTAL_RELAY_DEVICES = 10;
 
 // ===== GARDEN SENSOR DATA =====
 struct GardenData {
@@ -135,7 +153,6 @@ struct GardenData {
   bool fireDetected;
   unsigned long lastUpdated;
   
-  // Display tracking
   int lcdPage;
   int oledPage;
   unsigned long lastLcdUpdate;
@@ -145,48 +162,57 @@ struct GardenData {
 
 GardenData gardenData;
 
-// ===== DOOR DEVICE STATE MANAGEMENT =====
-struct DeviceState {
-  String serialNumber;
-  String lastAction;
-  bool doorOpen;
-  int servoAngle;
-  int pwmChannel;
-  bool isOnline;
-  unsigned long lastSeen;
-  String status;
-  String doorType;
-};
-
-// Door database for ESP8266 Door Hub with PCA9685
-DeviceState devices[9] = {
-  {"SERL27JUN2501JYR2RKVVX08V40YMGTW", "", false, 0, 0, false, 0, "offline", "SERVO_PCA9685"},
-  {"SERL27JUN2501JYR2RKVR0SC7SJ8P8DD", "", false, 0, 1, false, 0, "offline", "SERVO_PCA9685"},
-  {"SERL27JUN2501JYR2RKVRNHS46VR6AS1", "", false, 0, 2, false, 0, "offline", "SERVO_PCA9685"},
-  {"SERL27JUN2501JYR2RKVSE2RW7KQ4KMP", "", false, 0, 3, false, 0, "offline", "SERVO_PCA9685"},
-  {"SERL27JUN2501JYR2RKVTBZ40JPF88WP", "", false, 0, 4, false, 0, "offline", "SERVO_PCA9685"},
-  {"SERL27JUN2501JYR2RKVTXNCK1GB3HBZ", "", false, 0, 5, false, 0, "offline", "SERVO_PCA9685"},
-  {"SERL27JUN2501JYR2RKVS2P6XBVF1P2E", "", false, 0, 6, false, 0, "offline", "DUAL_PCA9685"},
-  {"SERL27JUN2501JYR2RKVTH6PWR9ETXC2", "", false, 0, 7, false, 0, "offline", "SERVO_PCA9685"},
-  {"SERL27JUN2501JYR2RKVVSBGRTM0TRFW", "", false, 0, 8, false, 0, "offline", "SERVO_PCA9685"}
-};
-
-const int TOTAL_DEVICES = 9;
-
 // ===== SYSTEM STATUS =====
 bool socketHubConnected = false;
-bool doorHubConnected = false;
 unsigned long lastSocketMessage = 0;
-unsigned long lastDoorMessage = 0;
+bool systemStable = true;
+unsigned long lastDisplayRefresh = 0;
+bool rtcAvailable = false;
+bool lcdAvailable = false;
+bool oledAvailable = false;
 
 // ===== AUTOMATION SETTINGS =====
 int soilMoistureThreshold = 30;
 int lightThreshold = 200;
+int humidityThreshold = 85;
+int nightTimeHour = 20;  // 8 PM
+int dayTimeHour = 6;     // 6 AM
 bool autoWateringEnabled = true;
 bool autoLightingEnabled = true;
 bool autoFanEnabled = true;
 unsigned long pumpStartTime = 0;
 const unsigned long maxPumpRunTime = 300000;
+
+// ===== DYNAMIC EVENT SYSTEM =====
+enum SystemPriority {
+  PRIORITY_USER_COMMAND = 0,    // User commands (highest)
+  PRIORITY_EMERGENCY = 1,       // Fire, flood
+  PRIORITY_CRITICAL = 2,        // Pump safety, temperature
+  PRIORITY_NORMAL = 3,          // Regular automation
+  PRIORITY_LOW = 4              // Lighting, comfort
+};
+
+struct AutomationEvent {
+  bool isActive;
+  unsigned long lastCheck;
+  unsigned long interval;
+  SystemPriority priority;
+};
+
+AutomationEvent automationEvents[5] = {
+  {true, 0, 500, PRIORITY_USER_COMMAND},     // User commands every 500ms
+  {true, 0, 1000, PRIORITY_EMERGENCY},       // Emergency check every 1s
+  {true, 0, 3000, PRIORITY_CRITICAL},        // Critical every 3s
+  {true, 0, 5000, PRIORITY_NORMAL},          // Normal every 5s
+  {true, 0, 10000, PRIORITY_LOW}             // Low priority every 10s
+};
+
+bool emergencyMode = false;
+bool nightMode = false;
+bool userCommandActive = false;
+unsigned long lastUserCommand = 0;
+const unsigned long USER_COMMAND_OVERRIDE_TIME = 300000; // 5 minutes
+unsigned long lastEventCheck = 0;
 
 // ===== RGB STATUS =====
 GardenStatus currentGardenStatus = STATUS_OFFLINE;
@@ -196,105 +222,48 @@ bool rgbBlinkState = false;
 // ===== DISPLAY SETTINGS =====
 const int LCD_PAGES = 4;
 const int OLED_PAGES = 3;
-unsigned long lcdPageDuration = 3000; // 3 seconds per page
-unsigned long oledPageDuration = 2000; // 2 seconds per page
+unsigned long lcdPageDuration = 4000;
+unsigned long oledPageDuration = 3000;
 
 // ===== STATISTICS =====
 unsigned long commandsProcessed = 0;
-unsigned long responsesForwarded = 0;
 unsigned long sensorReadings = 0;
 unsigned long relayCommands = 0;
-unsigned long localTouchCommands = 0;
+unsigned long localKeyCommands = 0;
 unsigned long systemUptime = 0;
 
-// ===== FUNCTION PROTOTYPES =====
-void initializeSensors();
-void initializeDevices();
-void initializeRGB();
-void initializeRelays();
-void initializeLCD();
-void initializeTouchSensors();
-
-void readGardenSensors();
-void processGardenAutomation();
-void processLightAutomation();
-void processFanAutomation();
-void startPump(String reason);
-void stopPump(String reason);
-void checkPumpSafety();
-
-void updateRGBStatus();
-GardenStatus determineGardenStatus();
-void setRGBColor(int red, int green, int blue);
-void handleRGBTest();
-
-void updateLCDDisplay();
-void displayLCDPage1(); // Temperature, Humidity, Time
-void displayLCDPage2(); // Soil, Light, Pump status
-void displayLCDPage3(); // Rain, Fire, Auto settings
-void displayLCDPage4(); // System status, connections
-
-void updateRelayStatusLEDs();
-void handleLocalTouchSensors();
-void checkTouchSensor(int relayIndex);
-
-void toggleRelay(int deviceIndex, String reason);
-void setRelayState(int deviceIndex, bool state, String reason);
-int findRelayDeviceBySerial(String serialNumber);
-void handleRelayCommand(String serialNumber, String action);
-void checkFireAlarm();
-void sendRelayStatusToSocket();
-void sendRelayDeviceStatus(int deviceIndex);
-
-void handleSocketHubMessage(String message);
-void handleGardenSocketCommand(String cmdMessage);
-void handleDoorSocketCommand(String cmdMessage);
-void handleRelaySocketCommand(String cmdMessage);
-void handleDoorHubMessage(String message);
-void handleDoorHubResponse(String respMessage);
-
-void forwardCommand(String serialNumber, String action);
-int findDeviceBySerial(String serialNumber);
-String extractJsonField(String json, String fieldName);
-void sendErrorResponse(String serialNumber, String action, String error);
-void sendRelayResponse(String serialNumber, String action, bool success, String result);
-void checkSystemHealth();
-void sendSystemHeartbeat();
-void printSystemStatus();
-int freeMemory();
+// ===== KEYPAD VARIABLES =====
+char lastKey = NO_KEY;
+unsigned long lastKeyTime = 0;
+const unsigned long KEY_DEBOUNCE_TIME = 200;
 
 void setup() {
-  // Initialize serial ports
-  Serial.begin(115200);   // Debug Output / USB
-  Serial1.begin(115200);  // ESP8266 Socket Hub
-  Serial2.begin(115200);  // ESP8266 Door Hub (PCA9685)
-  // Serial3 - REMOVED (No longer needed)
+  Serial.begin(115200);
+  Serial1.begin(115200);
+  delay(2000); // Reduced startup delay
 
-  delay(2000);
-
-  Serial.println("\n=== ARDUINO MEGA GARDEN HUB v3.0.0 (INTEGRATED SENSORS & DISPLAY) ===");
-  Serial.println("Hub ID: " + String(HUB_ID));
-  Serial.println("Features: " + String(TOTAL_DEVICES) + " doors + Garden sensors + LCD I2C + OLED I2C + RGB + " + String(TOTAL_RELAY_DEVICES) + " relays");
-  Serial.println("Interfaces:");
-  Serial.println("  Serial0: Debug Output / USB");
-  Serial.println("  Serial1: ESP8266 Socket Hub");
-  Serial.println("  Serial2: ESP8266 Door Hub (PCA9685)");
-  Serial.println("  I2C Bus: LCD 16x2 (0x27) + OLED 0.96\" (0x3C)");
-  Serial.println("  Integrated: Garden sensors, RGB LED, Relay status LEDs");
-
-  Wire.begin(); // Initialize I2C
+  // Initialize I2C first
+  Wire.begin();
+  Wire.setClock(100000);
   
   initializeRGB();
+  delay(500);
+  
   initializeRelays();
-  initializeLCD();
-  initializeOLED();
+  delay(500);
+  
+  initializeKeypad();
+  delay(500);
+  
+  initializeI2CDevices();
+  delay(500);
+  
   initializeSensors();
-  initializeDevices();
-  initializeTouchSensors();
-
-  Serial.println("[INIT] ✓ Mega Garden Hub Ready (Integrated System)");
-  Serial.println("==================================================================\n");
-
+  
+  // Force initial reads
+  readGardenSensors();
+  updateDisplays();
+  
   systemUptime = millis();
 }
 
@@ -305,9 +274,9 @@ void initializeRGB() {
   pinMode(RGB_GREEN_PIN, OUTPUT);
   pinMode(RGB_BLUE_PIN, OUTPUT);
   
-  setRGBColor(255, 0, 0); delay(300);
-  setRGBColor(0, 255, 0); delay(300);
-  setRGBColor(0, 0, 255); delay(300);
+  setRGBColor(255, 0, 0); delay(500);
+  setRGBColor(0, 255, 0); delay(500);
+  setRGBColor(0, 0, 255); delay(500);
   setRGBColor(0, 0, 0);
   
   gardenData.rgbStatus = "Initialized";
@@ -315,40 +284,72 @@ void initializeRGB() {
 }
 
 void initializeRelays() {
-  Serial.println("[RELAY] Initializing 8-channel relay module (Active HIGH)...");
+  Serial.println("[RELAY] Initializing 10 relays with power management...");
   
   for (int i = 0; i < TOTAL_RELAY_DEVICES; i++) {
     pinMode(relayDevices[i].relayPin, OUTPUT);
-    digitalWrite(relayDevices[i].relayPin, LOW);  // Active HIGH - OFF state
     
-    pinMode(relayDevices[i].statusLedPin, OUTPUT);
-    digitalWrite(relayDevices[i].statusLedPin, LOW);  // LED OFF
+    if (relayDevices[i].activeHigh) {
+      digitalWrite(relayDevices[i].relayPin, LOW);
+    } else {
+      digitalWrite(relayDevices[i].relayPin, HIGH);
+    }
     
     relayDevices[i].isOn = false;
     relayDevices[i].lastToggle = 0;
     relayDevices[i].status = "off";
     
+    String triggerType = relayDevices[i].activeHigh ? "HIGH" : "LOW";
     Serial.println("[RELAY] " + relayDevices[i].deviceName + 
                    " (Pin " + String(relayDevices[i].relayPin) + 
-                   ", LED " + String(relayDevices[i].statusLedPin) + "): " + 
-                   relayDevices[i].serialNumber);
+                   ", Key '" + String(relayDevices[i].keypadKey) + 
+                   "', Trigger " + triggerType + ")");
+    
+    delay(100);
   }
   
-  Serial.println("[RELAY] ✓ All 8 relays initialized (Active HIGH, OFF state)");
+  Serial.println("[RELAY] ✓ All 10 relays initialized safely");
 }
 
-void initializeLCD() {
-  Serial.println("[LCD] Initializing 16x2 LCD I2C display...");
+void initializeKeypad() {
+  // Set keypad parameters
+  keypad.setDebounceTime(50);
+  keypad.setHoldTime(1000);
+}
+
+void initializeI2CDevices() {
+  Serial.println("[I2C] Initializing I2C devices...");
   
+  delay(200);
+  if (rtc.begin()) {
+    rtcAvailable = true;
+    Serial.println("[RTC] ✓ DS3231 RTC detected");
+    
+    if (rtc.lostPower()) {
+      Serial.println("[RTC] Lost power, setting time...");
+      rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    }
+    
+    DateTime now = rtc.now();
+    Serial.println("[RTC] Current time: " + String(now.year()) + "/" + 
+                   String(now.month()) + "/" + String(now.day()) + " " +
+                   String(now.hour()) + ":" + String(now.minute()) + ":" + String(now.second()));
+  } else {
+    Serial.println("[RTC] ✗ DS3231 not found");
+  }
+  
+  delay(300);
   lcd.init();
   lcd.backlight();
   lcd.clear();
   
-  // Startup message
   lcd.setCursor(0, 0);
   lcd.print("MEGA GARDEN HUB");
   lcd.setCursor(0, 1);
-  lcd.print("v3.0.0 Starting");
+  lcd.print("v3.3.0 KEYPAD");
+  
+  lcdAvailable = true;
+  Serial.println("[LCD] ✓ 16x2 LCD I2C ready");
   
   delay(2000);
   lcd.clear();
@@ -357,39 +358,36 @@ void initializeLCD() {
   gardenData.lastLcdUpdate = 0;
   gardenData.lastPageChange = millis();
   
-  Serial.println("[LCD] ✓ 16x2 LCD I2C ready (Address: 0x" + String(LCD_I2C_ADDRESS, HEX) + ")");
-}
-
-void initializeOLED() {
-  Serial.println("[OLED] Initializing 0.96\" OLED I2C display...");
-  
-  if (!oled.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDRESS)) {
-    Serial.println("[OLED] ✗ SSD1306 allocation failed!");
-    return;
+  delay(300);
+  if (oled.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDRESS)) {
+    oledAvailable = true;
+    
+    oled.clearDisplay();
+    oled.setTextSize(1);
+    oled.setTextColor(SSD1306_WHITE);
+    
+    oled.setCursor(0, 0);
+    oled.setTextSize(2);
+    oled.println("MEGA HUB");
+    oled.setTextSize(1);
+    oled.println("Keypad Ready!");
+    oled.println("v3.3.0");
+    oled.println("");
+    oled.println("4x4 Matrix Input");
+    oled.display();
+    
+    Serial.println("[OLED] ✓ 0.96\" OLED I2C ready");
+    
+    delay(2000);
+    oled.clearDisplay();
+    
+    gardenData.oledPage = 0;
+    gardenData.lastOledUpdate = 0;
+  } else {
+    Serial.println("[OLED] ✗ SSD1306 allocation failed");
   }
   
-  oled.clearDisplay();
-  oled.setTextSize(1);
-  oled.setTextColor(SSD1306_WHITE);
-  
-  // Startup message
-  oled.setCursor(0, 0);
-  oled.setTextSize(2);
-  oled.println("MEGA HUB");
-  oled.setTextSize(1);
-  oled.println("Garden System");
-  oled.println("v3.0.0");
-  oled.println("");
-  oled.println("OLED Ready...");
-  oled.display();
-  
-  delay(2000);
-  oled.clearDisplay();
-  
-  gardenData.oledPage = 0;
-  gardenData.lastOledUpdate = 0;
-  
-  Serial.println("[OLED] ✓ 0.96\" OLED I2C ready (Address: 0x" + String(OLED_I2C_ADDRESS, HEX) + ")");
+  Serial.println("[I2C] I2C devices initialization complete");
 }
 
 void initializeSensors() {
@@ -398,22 +396,14 @@ void initializeSensors() {
   dht.begin();
   Serial.println("[SENSORS] ✓ DHT11 initialized");
 
-  if (!rtc.begin()) {
-    Serial.println("[SENSORS] ✗ RTC not found");
-  } else {
-    Serial.println("[SENSORS] ✓ RTC initialized");
-  }
-
-  pinMode(PUMP_RELAY_PIN, OUTPUT);
-  digitalWrite(PUMP_RELAY_PIN, LOW);
   pinMode(WATER_SENSOR_PIN, INPUT);
   pinMode(LIGHT_SENSOR_PIN, INPUT);
   pinMode(SOIL_MOISTURE_PIN, INPUT);
 
-  gardenData.temperature = 0;
-  gardenData.humidity = 0;
-  gardenData.soilMoisture = 0;
-  gardenData.lightLevel = 0;
+  gardenData.temperature = 25.0;
+  gardenData.humidity = 50.0;
+  gardenData.soilMoisture = 50;
+  gardenData.lightLevel = 500;
   gardenData.rainDetected = false;
   gardenData.pumpRunning = false;
   gardenData.currentTime = "00:00:00";
@@ -421,106 +411,43 @@ void initializeSensors() {
   gardenData.fireDetected = false;
   gardenData.lastUpdated = 0;
 
-  Serial.println("[SENSORS] ✓ All garden sensors integrated into Mega");
-}
-
-void initializeDevices() {
-  Serial.println("[INIT] Initializing ESP8266 Door Hub device database...");
-
-  for (int i = 0; i < TOTAL_DEVICES; i++) {
-    devices[i].lastAction = "none";
-    devices[i].doorOpen = false;
-    devices[i].servoAngle = 0;
-    devices[i].isOnline = false;
-    devices[i].lastSeen = 0;
-    devices[i].status = "offline";
-
-    Serial.println("Door " + String(i + 1) + " (Ch" + String(devices[i].pwmChannel) + "): " + 
-                   devices[i].serialNumber + " [" + devices[i].doorType + "]");
-  }
-
-  Serial.println("[INIT] ✓ " + String(TOTAL_DEVICES) + " doors for PCA9685 control");
-}
-
-void initializeTouchSensors() {
-  Serial.println("[TOUCH] Initializing local touch sensors (Future Implementation)...");
+  Serial.println("[SENSORS] ✓ All garden sensors integrated");
   
-  for (int i = 0; i < TOTAL_RELAY_DEVICES; i++) {
-    if (relayDevices[i].localControl) {
-      pinMode(relayDevices[i].touchPin, INPUT_PULLUP);
-      relayDevices[i].lastTouchTime = 0;
-      
-      Serial.println("[TOUCH] " + relayDevices[i].deviceName + 
-                     " touch sensor (Pin " + String(relayDevices[i].touchPin) + ") ready");
-    }
-  }
-  
-  Serial.println("[TOUCH] ✓ Touch sensors ready for local relay control");
+  readGardenSensors();
 }
 
 void loop() {
-  // Handle serial communications
   if (Serial1.available()) {
     String socketMessage = Serial1.readStringUntil('\n');
     handleSocketHubMessage(socketMessage);
   }
 
-  if (Serial2.available()) {
-    String doorMessage = Serial2.readStringUntil('\n');
-    handleDoorHubMessage(doorMessage);
-  }
-
-  // Sensor reading and automation
   static unsigned long lastSensorRead = 0;
-  if (millis() - lastSensorRead > 15000) { // Read every 15 seconds
+  if (millis() - lastSensorRead > 10000) {
     readGardenSensors();
     processGardenAutomation();
     lastSensorRead = millis();
   }
 
-  // RGB LED updates
   static unsigned long lastRGBCheck = 0;
   if (millis() - lastRGBCheck > 1000) {
     updateRGBStatus();
     lastRGBCheck = millis();
   }
 
-  // LCD Display updates
-  static unsigned long lastLCDCheck = 0;
-  if (millis() - lastLCDCheck > 500) { // Update LCD every 500ms
-    updateLCDDisplay();
-    lastLCDCheck = millis();
+  // Handle keypad input (high frequency)
+  static unsigned long lastKeyCheck = 0;
+  if (millis() - lastKeyCheck > 10) {
+    handleKeypadInput();
+    lastKeyCheck = millis();
   }
 
-  // OLED Display updates
-  static unsigned long lastOLEDCheck = 0;
-  if (millis() - lastOLEDCheck > 300) { // Update OLED every 300ms
-    updateOLEDDisplay();
-    lastOLEDCheck = millis();
+  static unsigned long lastDisplayCheck = 0;
+  if (millis() - lastDisplayCheck > 1000) {
+    updateDisplays();
+    lastDisplayCheck = millis();
   }
 
-  // Relay status LED updates
-  static unsigned long lastLEDCheck = 0;
-  if (millis() - lastLEDCheck > 200) {
-    updateRelayStatusLEDs();
-    lastLEDCheck = millis();
-  }
-
-  // Local touch sensor handling
-  static unsigned long lastTouchCheck = 0;
-  if (millis() - lastTouchCheck > 100) {
-    handleLocalTouchSensors();
-    lastTouchCheck = millis();
-  }
-
-  // Fire alarm check
-  static unsigned long lastFireCheck = 0;
-  if (millis() - lastFireCheck > 5000) {
-    checkFireAlarm();
-    lastFireCheck = millis();
-  }
-
-  // Relay status broadcast
   static unsigned long lastRelayBroadcast = 0;
   if (millis() - lastRelayBroadcast > 60000) {
     sendRelayStatusToSocket();
@@ -547,24 +474,165 @@ void loop() {
     lastHeartbeat = millis();
   }
 
-  delay(50); // Reduced delay for better responsiveness
+  delay(5);
 }
 
-// ===== GARDEN SENSOR FUNCTIONS =====
+// ===== KEYPAD FUNCTIONS =====
+void handleKeypadInput() {
+  char key = keypad.getKey();
+  
+  if (key != NO_KEY && key != lastKey && (millis() - lastKeyTime > KEY_DEBOUNCE_TIME)) {
+    processKeyPress(key);
+    lastKey = key;
+    lastKeyTime = millis();
+    localKeyCommands++;
+  }
+}
+
+void processKeyPress(char key) {
+  // Find key mapping
+  for (int i = 0; i < TOTAL_KEY_MAPPINGS; i++) {
+    if (keyMappings[i].key == key) {
+      if (keyMappings[i].relayIndex >= 0) {
+        // Relay control key
+        int relayIndex = keyMappings[i].relayIndex;
+        toggleRelayWithSafety(relayIndex, "Keypad: Key '" + String(key) + "'");
+        relayDevices[relayIndex].lastKeyPress = millis();
+      } else {
+        // Special function key
+        handleSpecialFunction(key, keyMappings[i].function);
+      }
+      return;
+    }
+  }
+}
+
+void handleSpecialFunction(char key, String function) {
+  if (key == 'A') {
+    autoWateringEnabled = !autoWateringEnabled;
+  } else if (key == 'B') {
+    autoLightingEnabled = !autoLightingEnabled;
+  } else if (key == 'C') {
+    autoFanEnabled = !autoFanEnabled;
+  } else if (key == 'D') {
+    emergencyStop();
+  } else if (key == '*') {
+    // Status check - send to socket only
+    sendSocketStatus("status_request", "Manual status check");
+  } else if (key == '#') {
+    allRelaysOff();
+  }
+}
+
+void emergencyStop() {
+  Serial.println("[EMERGENCY] STOPPING ALL SYSTEMS!");
+  
+  for (int i = 0; i < TOTAL_RELAY_DEVICES; i++) {
+    setRelayState(i, false, "Emergency stop");
+  }
+  
+  autoWateringEnabled = false;
+  autoLightingEnabled = false;
+  autoFanEnabled = false;
+  
+  setRGBColor(255, 0, 0); // Red alert
+  
+  Serial.println("[EMERGENCY] All systems stopped!");
+}
+
+void allRelaysOff() {
+  Serial.println("[KEYPAD] Turning all relays OFF");
+  
+  for (int i = 0; i < TOTAL_RELAY_DEVICES; i++) {
+    if (relayDevices[i].isOn) {
+      setRelayState(i, false, "All off command");
+    }
+  }
+  
+  Serial.println("[KEYPAD] ✓ All relays OFF");
+}
+
+void toggleRelayWithSafety(int relayIndex, String reason) {
+  if (relayDevices[relayIndex].powerSafeMode && !relayDevices[relayIndex].isOn) {
+    if (checkHighPowerRelaySafety(relayIndex)) {
+      Serial.println("[SAFETY] Power safety prevented toggle: " + relayDevices[relayIndex].deviceName);
+      return;
+    }
+  }
+  
+  toggleRelay(relayIndex, reason);
+}
+
+bool checkHighPowerRelaySafety(int relayIndex) {
+  int activePowerRelays = 0;
+  for (int i = 0; i < TOTAL_RELAY_DEVICES; i++) {
+    if (relayDevices[i].powerSafeMode && relayDevices[i].isOn) {
+      activePowerRelays++;
+    }
+  }
+  
+  if (activePowerRelays >= 2 && !relayDevices[relayIndex].isOn) {
+    return true;
+  }
+  
+  return false;
+}
+
+// ===== RTC TIME SETTING FUNCTIONS =====
+void setRTCTime(int year, int month, int day, int hour, int minute, int second) {
+  if (rtcAvailable) {
+    rtc.adjust(DateTime(year, month, day, hour, minute, second));
+    Serial.println("[RTC] ✓ Time set to: " + String(year) + "/" + String(month) + "/" + String(day) + 
+                   " " + String(hour) + ":" + String(minute) + ":" + String(second));
+    
+    // Verify setting
+    DateTime now = rtc.now();
+    Serial.println("[RTC] Verified time: " + String(now.year()) + "/" + String(now.month()) + "/" + 
+                   String(now.day()) + " " + String(now.hour()) + ":" + String(now.minute()) + ":" + String(now.second()));
+  } else {
+    Serial.println("[RTC] ✗ RTC not available");
+  }
+}
+
+// Set current Vietnam time (GMT+7)
+void setVietnamTime() {
+  // Example: January 15, 2025, 14:30:00 (2:30 PM)
+  // Update these values to current time
+  setRTCTime(2025, 1, 15, 14, 30, 0);
+}
+
+// Sync time via Serial command
+void handleTimeCommand(String timeStr) {
+  // Format: "TIME:YYYY,MM,DD,HH,MM,SS"
+  if (timeStr.startsWith("TIME:")) {
+    String timeData = timeStr.substring(5);
+    
+    int year = timeData.substring(0, 4).toInt();
+    int month = timeData.substring(5, 7).toInt();
+    int day = timeData.substring(8, 10).toInt();
+    int hour = timeData.substring(11, 13).toInt();
+    int minute = timeData.substring(14, 16).toInt();
+    int second = timeData.substring(17, 19).toInt();
+    
+    setRTCTime(year, month, day, hour, minute, second);
+  }
+}
 void readGardenSensors() {
   sensorReadings++;
 
-  gardenData.temperature = dht.readTemperature();
-  gardenData.humidity = dht.readHumidity();
-
-  if (isnan(gardenData.temperature) || isnan(gardenData.humidity)) {
-    Serial.println("[SENSORS] ✗ DHT read failed, using defaults");
-    if (isnan(gardenData.temperature)) gardenData.temperature = 25.0;
-    if (isnan(gardenData.humidity)) gardenData.humidity = 50.0;
+  float tempReading = dht.readTemperature();
+  float humReading = dht.readHumidity();
+  
+  if (!isnan(tempReading)) {
+    gardenData.temperature = tempReading;
+  }
+  if (!isnan(humReading)) {
+    gardenData.humidity = humReading;
   }
 
   int soilRaw = analogRead(SOIL_MOISTURE_PIN);
   gardenData.soilMoisture = map(soilRaw, 1023, 0, 0, 100);
+  gardenData.soilMoisture = constrain(gardenData.soilMoisture, 0, 100);
 
   bool lightDigital = digitalRead(LIGHT_SENSOR_PIN);
   gardenData.lightLevel = lightDigital ? 0 : 1000;
@@ -574,74 +642,241 @@ void readGardenSensors() {
 
   gardenData.fireDetected = (gardenData.temperature > 45);
 
-  DateTime now = rtc.now();
-  gardenData.currentTime = String(now.hour()) + ":" + 
-                          (now.minute() < 10 ? "0" : "") + String(now.minute()) + ":" + 
-                          (now.second() < 10 ? "0" : "") + String(now.second());
+  if (rtcAvailable) {
+    DateTime now = rtc.now();
+    gardenData.currentTime = String(now.hour()) + ":" + 
+                            (now.minute() < 10 ? "0" : "") + String(now.minute()) + ":" + 
+                            (now.second() < 10 ? "0" : "") + String(now.second());
+  } else {
+    gardenData.currentTime = String(millis() / 1000);
+  }
 
   gardenData.lastUpdated = millis();
+  gardenData.pumpRunning = relayDevices[8].isOn;
 
   Serial.println("[SENSORS] T:" + String(gardenData.temperature, 1) + "°C | " + 
                 "H:" + String(gardenData.humidity, 1) + "% | " + 
                 "S:" + String(gardenData.soilMoisture) + "% | " + 
                 "L:" + String(gardenData.lightLevel) + " | " + 
                 "R:" + String(gardenData.rainDetected ? "Y" : "N") + " | " +
-                "F:" + String(gardenData.fireDetected ? "Y" : "N"));
+                "F:" + String(gardenData.fireDetected ? "Y" : "N") + " | " +
+                "Time:" + gardenData.currentTime);
 }
 
 void processGardenAutomation() {
-  if (autoWateringEnabled) {
-    if (gardenData.rainDetected && gardenData.pumpRunning) {
-      stopPump("Rain detected");
-    } else if (gardenData.soilMoisture < soilMoistureThreshold && !gardenData.pumpRunning && !gardenData.rainDetected) {
-      startPump("Auto: Low soil moisture");
-    } else if (gardenData.soilMoisture > (soilMoistureThreshold + 20) && gardenData.pumpRunning) {
-      stopPump("Auto: Soil moisture sufficient");
+  unsigned long currentTime = millis();
+  
+  updateTimeBasedStates();
+  
+  // Check user command override timeout
+  if (userCommandActive && (currentTime - lastUserCommand > USER_COMMAND_OVERRIDE_TIME)) {
+    userCommandActive = false;
+  }
+  
+  // Process events by priority (5 levels now)
+  for (int i = 0; i < 5; i++) {
+    if (automationEvents[i].isActive && (currentTime - automationEvents[i].lastCheck >= automationEvents[i].interval)) {
+      processEventByPriority((SystemPriority)i);
+      automationEvents[i].lastCheck = currentTime;
     }
   }
+}
 
-  if (autoLightingEnabled) {
-    processLightAutomation();
-  }
-
-  if (autoFanEnabled) {
-    processFanAutomation();
+void updateTimeBasedStates() {
+  if (rtcAvailable) {
+    DateTime now = rtc.now();
+    int currentHour = now.hour();
+    nightMode = (currentHour >= nightTimeHour || currentHour < dayTimeHour);
   }
 }
 
-void processLightAutomation() {
-  bool shouldLightBeOn = (gardenData.lightLevel < lightThreshold) && !gardenData.rainDetected;
+void processEventByPriority(SystemPriority priority) {
+  switch (priority) {
+    case PRIORITY_USER_COMMAND:
+      handleUserCommands();
+      break;
+    case PRIORITY_EMERGENCY:
+      handleEmergencyEvents();
+      break;
+    case PRIORITY_CRITICAL:
+      handleCriticalEvents();
+      break;
+    case PRIORITY_NORMAL:
+      if (!userCommandActive) handleNormalAutomation();
+      break;
+    case PRIORITY_LOW:
+      if (!userCommandActive) handleComfortAutomation();
+      break;
+  }
+}
+
+// ===== USER COMMAND HANDLING =====
+void handleUserCommands() {
+  // Process pending socket commands (handled in handleSocketHubMessage)
+  // This maintains user command priority in the event system
+}
+
+void setUserCommandOverride(String reason) {
+  userCommandActive = true;
+  lastUserCommand = millis();
+  sendSocketStatus("user_override", reason);
+}
+
+// ===== EMERGENCY EVENT HANDLING =====
+void handleEmergencyEvents() {
+  // Fire detection combo
+  if (gardenData.fireDetected && !emergencyMode) {
+    activateFireEmergency();
+    return;
+  }
   
-  // Light 1 automation
-  if (shouldLightBeOn && !relayDevices[2].isOn) {
-    setRelayState(2, true, "Auto: Dark conditions");
-  } else if (!shouldLightBeOn && relayDevices[2].isOn) {
-    setRelayState(2, false, "Auto: Sufficient light");
+  // Exit emergency if conditions clear
+  if (!gardenData.fireDetected && emergencyMode) {
+    deactivateEmergency();
+  }
+  
+  // Flood protection
+  if (gardenData.rainDetected && gardenData.pumpRunning) {
+    stopPump("Emergency: Rain flood protection");
   }
 }
 
-void processFanAutomation() {
-  bool shouldFanBeOn = (gardenData.temperature > 30) || (gardenData.humidity > 80);
+void activateFireEmergency() {
+  emergencyMode = true;
+  
+  // Emergency combo sequence (optimized timing)
+  setRelayState(8, true, "Emergency: Fire suppression");    // Pump ON
+  delay(100);
+  setRelayState(1, true, "Emergency: Fire alarm");          // Buzzer ON
+  delay(50);
+  
+  // Turn off all lighting for safety
+  for (int i = 2; i <= 7; i++) {
+    if (relayDevices[i].isOn) {
+      setRelayState(i, false, "Emergency: Fire safety");
+    }
+    delay(30);
+  }
+  
+  setRelayState(0, true, "Emergency: Ventilation");         // Fan ON
+  setRGBColor(255, 0, 0); // Red alert
+  
+  sendSocketStatus("fire_emergency", "Fire protocol activated");
+}
+
+void deactivateEmergency() {
+  emergencyMode = false;
+  setRelayState(1, false, "Emergency cleared: Buzzer off");
+  sendSocketStatus("emergency_cleared", "Emergency mode deactivated");
+}
+
+// ===== CRITICAL EVENT HANDLING =====
+void handleCriticalEvents() {
+  // Pump safety with temperature check
+  if (gardenData.pumpRunning) {
+    if (pumpStartTime > 0 && (millis() - pumpStartTime > maxPumpRunTime)) {
+      stopPump("Critical: Safety timeout");
+    } else if (gardenData.temperature > 40) {
+      stopPump("Critical: Overheating protection");
+    }
+  }
+  
+  // Critical temperature management
+  if (gardenData.temperature > 35 && !relayDevices[0].isOn) {
+    setRelayState(0, true, "Critical: Temperature cooling");
+  }
+}
+
+// ===== NORMAL AUTOMATION =====
+void handleNormalAutomation() {
+  if (!emergencyMode) {
+    processIntelligentWatering();
+  }
+}
+
+void processIntelligentWatering() {
+  if (!autoWateringEnabled) return;
+  
+  bool shouldWater = false;
+  String wateringReason = "";
+  
+  // Smart watering logic with multiple conditions
+  if (gardenData.soilMoisture < soilMoistureThreshold && 
+      !gardenData.rainDetected && 
+      !gardenData.pumpRunning &&
+      gardenData.humidity < humidityThreshold &&
+      !nightMode) {
+    
+    shouldWater = true;
+    wateringReason = "Smart: Low soil, good conditions";
+  }
+  
+  // Stop watering conditions
+  if (gardenData.pumpRunning && 
+      (gardenData.soilMoisture > (soilMoistureThreshold + 15) ||
+       gardenData.humidity > humidityThreshold ||
+       nightMode ||
+       gardenData.rainDetected)) {
+    
+    stopPump("Smart: Conditions changed");
+    return;
+  }
+  
+  if (shouldWater) {
+    startPump(wateringReason);
+  }
+}
+
+// ===== COMFORT AUTOMATION =====
+void handleComfortAutomation() {
+  if (!emergencyMode) {
+    processIntelligentLighting();
+    processIntelligentFan();
+  }
+}
+
+void processIntelligentLighting() {
+  if (!autoLightingEnabled) return;
+  
+  // Smart lighting: Dark + Not raining + Not emergency
+  bool shouldLightBeOn = (gardenData.lightLevel < lightThreshold) && 
+                        !gardenData.rainDetected && 
+                        !emergencyMode;
+  
+  // Only control LED1 (relay index 2) for basic lighting
+  if (shouldLightBeOn && !relayDevices[2].isOn) {
+    setRelayState(2, true, "Smart: Intelligent lighting");
+  } else if (!shouldLightBeOn && relayDevices[2].isOn) {
+    setRelayState(2, false, "Smart: Light not needed");
+  }
+}
+
+void processIntelligentFan() {
+  if (!autoFanEnabled) return;
+  
+  // Smart fan control with temperature and humidity
+  bool shouldFanBeOn = ((gardenData.temperature > 30) || 
+                       (gardenData.humidity > 80)) && 
+                       !emergencyMode;
   
   if (shouldFanBeOn && !relayDevices[0].isOn) {
-    setRelayState(0, true, "Auto: High temp/humidity");
-  } else if (!shouldFanBeOn && relayDevices[0].isOn && gardenData.temperature < 27) {
-    setRelayState(0, false, "Auto: Normal conditions");
+    setRelayState(0, true, "Smart: Climate control");
+  } else if (!shouldFanBeOn && relayDevices[0].isOn && 
+             gardenData.temperature < 27 && gardenData.humidity < 70) {
+    setRelayState(0, false, "Smart: Climate normal");
   }
 }
 
 void startPump(String reason) {
-  digitalWrite(PUMP_RELAY_PIN, HIGH);
-  gardenData.pumpRunning = true;
+  setRelayState(8, true, reason);
   pumpStartTime = millis();
-  Serial.println("[PUMP] ✓ Started - " + reason);
+  sendSocketStatus("pump_start", reason);
 }
 
 void stopPump(String reason) {
-  digitalWrite(PUMP_RELAY_PIN, LOW);
-  gardenData.pumpRunning = false;
+  setRelayState(8, false, reason);
   pumpStartTime = 0;
-  Serial.println("[PUMP] ✓ Stopped - " + reason);
+  sendSocketStatus("pump_stop", reason);
 }
 
 void checkPumpSafety() {
@@ -650,280 +885,167 @@ void checkPumpSafety() {
   }
 }
 
-// ===== LCD DISPLAY FUNCTIONS =====
+// ===== DISPLAY FUNCTIONS =====
+void updateDisplays() {
+  systemStable = !anyHighPowerRelayActive();
+  
+  // Simple display rotation without conflicts
+  static bool displayToggle = false;
+  
+  if (displayToggle && lcdAvailable) {
+    updateLCDDisplay();
+  } else if (!displayToggle && oledAvailable) {
+    updateOLEDDisplay();
+  }
+  
+  displayToggle = !displayToggle;
+}
+
 void updateLCDDisplay() {
-  // Change page every 3 seconds
   if (millis() - gardenData.lastPageChange > lcdPageDuration) {
     gardenData.lcdPage = (gardenData.lcdPage + 1) % LCD_PAGES;
     gardenData.lastPageChange = millis();
     lcd.clear();
   }
 
-  // Update current page content
   switch (gardenData.lcdPage) {
-    case 0: displayLCDPage1(); break;
-    case 1: displayLCDPage2(); break;
-    case 2: displayLCDPage3(); break;
-    case 3: displayLCDPage4(); break;
+    case 0:
+      lcd.setCursor(0, 0);
+      lcd.print("T:");
+      lcd.print(String(gardenData.temperature, 1));
+      lcd.print("C H:");
+      lcd.print(String(gardenData.humidity, 1));
+      lcd.print("%");
+      lcd.setCursor(0, 1);
+      lcd.print("Time: ");
+      lcd.print(gardenData.currentTime);
+      break;
+      
+    case 1:
+      lcd.setCursor(0, 0);
+      lcd.print("Soil:");
+      lcd.print(String(gardenData.soilMoisture));
+      lcd.print("% L:");
+      lcd.print(String(gardenData.lightLevel));
+      lcd.setCursor(0, 1);
+      lcd.print("Pump:");
+      lcd.print(gardenData.pumpRunning ? "ON " : "OFF");
+      lcd.print(" Auto:");
+      lcd.print(autoWateringEnabled ? "Y" : "N");
+      break;
+      
+    case 2:
+      lcd.setCursor(0, 0);
+      lcd.print("Keypad:4x4 K:");
+      lcd.print(String(localKeyCommands));
+      lcd.setCursor(0, 1);
+      lcd.print("Rain:");
+      lcd.print(gardenData.rainDetected ? "Y" : "N");
+      lcd.print(" Fire:");
+      lcd.print(gardenData.fireDetected ? "Y" : "N");
+      lcd.print(" RTC:");
+      lcd.print(rtcAvailable ? "Y" : "N");
+      break;
+      
+    case 3:
+      lcd.setCursor(0, 0);
+      lcd.print("Socket:");
+      lcd.print(socketHubConnected ? "Y" : "N");
+      lcd.print(" Stable:");
+      lcd.print(systemStable ? "Y" : "N");
+      lcd.setCursor(0, 1);
+      lcd.print("Keys:");
+      lcd.print(String(localKeyCommands));
+      lcd.print(" Up:");
+      lcd.print(String((millis() - systemUptime) / 60000));
+      lcd.print("m");
+      break;
   }
 }
 
-void displayLCDPage1() {
-  // Page 1: Temperature, Humidity, Time
-  lcd.setCursor(0, 0);
-  lcd.print("T:");
-  lcd.print(String(gardenData.temperature, 1));
-  lcd.print("C H:");
-  lcd.print(String(gardenData.humidity, 1));
-  lcd.print("%");
-  
-  lcd.setCursor(0, 1);
-  lcd.print("Time: ");
-  lcd.print(gardenData.currentTime);
-}
-
-void displayLCDPage2() {
-  // Page 2: Soil, Light, Pump status
-  lcd.setCursor(0, 0);
-  lcd.print("Soil:");
-  lcd.print(String(gardenData.soilMoisture));
-  lcd.print("% L:");
-  lcd.print(String(gardenData.lightLevel));
-  
-  lcd.setCursor(0, 1);
-  lcd.print("Pump:");
-  lcd.print(gardenData.pumpRunning ? "ON " : "OFF");
-  lcd.print(" Auto:");
-  lcd.print(autoWateringEnabled ? "Y" : "N");
-}
-
-void displayLCDPage3() {
-  // Page 3: Rain, Fire, Auto settings
-  lcd.setCursor(0, 0);
-  lcd.print("Rain:");
-  lcd.print(gardenData.rainDetected ? "YES" : "NO ");
-  lcd.print(" Fire:");
-  lcd.print(gardenData.fireDetected ? "YES" : "NO");
-  
-  lcd.setCursor(0, 1);
-  lcd.print("A-W:");
-  lcd.print(autoWateringEnabled ? "Y" : "N");
-  lcd.print(" A-L:");
-  lcd.print(autoLightingEnabled ? "Y" : "N");
-  lcd.print(" A-F:");
-  lcd.print(autoFanEnabled ? "Y" : "N");
-}
-
-void displayLCDPage4() {
-  // Page 4: System status, connections
-  lcd.setCursor(0, 0);
-  lcd.print("Sock:");
-  lcd.print(socketHubConnected ? "Y" : "N");
-  lcd.print(" Door:");
-  lcd.print(doorHubConnected ? "Y" : "N");
-  lcd.print(" RGB:");
-  lcd.print(gardenData.rgbStatus.substring(0, 3));
-  
-  lcd.setCursor(0, 1);
-  lcd.print("Up:");
-  lcd.print(String((millis() - systemUptime) / 60000));
-  lcd.print("m Free:");
-  lcd.print(String(freeMemory()));
-}
-
-// ===== OLED DISPLAY FUNCTIONS =====
 void updateOLEDDisplay() {
-  // Change page every 2 seconds
   if (millis() - gardenData.lastOledUpdate > oledPageDuration) {
     gardenData.oledPage = (gardenData.oledPage + 1) % OLED_PAGES;
     gardenData.lastOledUpdate = millis();
     oled.clearDisplay();
   }
 
-  // Update current page content
   switch (gardenData.oledPage) {
-    case 0: displayOLEDPage1(); break;
-    case 1: displayOLEDPage2(); break;
-    case 2: displayOLEDPage3(); break;
+    case 0:
+      oled.setTextSize(1);
+      oled.setCursor(0, 0);
+      oled.println("GARDEN SENSORS");
+      oled.setCursor(0, 12);
+      oled.print("Temp: ");
+      oled.print(String(gardenData.temperature, 1));
+      oled.print("C");
+      oled.setCursor(0, 22);
+      oled.print("Humidity: ");
+      oled.print(String(gardenData.humidity, 1));
+      oled.print("%");
+      oled.setCursor(0, 32);
+      oled.print("Soil: ");
+      oled.print(String(gardenData.soilMoisture));
+      oled.print("%");
+      oled.setCursor(0, 42);
+      oled.print("Light: ");
+      oled.print(String(gardenData.lightLevel));
+      oled.setCursor(0, 52);
+      oled.print("Time: ");
+      oled.print(gardenData.currentTime);
+      break;
+      
+    case 1:
+      oled.setTextSize(1);
+      oled.setCursor(0, 0);
+      oled.println("RELAY STATUS");
+      for (int i = 0; i < 10; i++) {
+        int x = (i % 5) * 25;
+        int y = 15 + (i / 5) * 20;
+        oled.drawRect(x, y, 20, 15, SSD1306_WHITE);
+        if (relayDevices[i].isOn) {
+          oled.fillRect(x + 1, y + 1, 18, 13, SSD1306_WHITE);
+          oled.setTextColor(SSD1306_BLACK);
+        } else {
+          oled.setTextColor(SSD1306_WHITE);
+        }
+        oled.setCursor(x + 6, y + 4);
+        oled.print(i < 9 ? String(i + 1) : "0");
+        oled.setTextColor(SSD1306_WHITE);
+      }
+      oled.setCursor(0, 55);
+      oled.print("Keys: ");
+      oled.print(String(localKeyCommands));
+      break;
+      
+    case 2:
+      oled.setTextSize(1);
+      oled.setCursor(0, 0);
+      oled.println("4x4 KEYPAD");
+      oled.setCursor(0, 12);
+      oled.print("1-9,0=Relays");
+      oled.setCursor(0, 22);
+      oled.print("A=Water B=Light");
+      oled.setCursor(0, 32);
+      oled.print("C=Fan D=EmgStop");
+      oled.setCursor(0, 42);
+      oled.print("*=Status #=AllOff");
+      oled.setCursor(0, 52);
+      oled.print("Total: ");
+      oled.print(String(localKeyCommands));
+      break;
   }
   
   oled.display();
 }
 
-void displayOLEDPage1() {
-  // Page 1: Real-time sensor data with graphics
-  oled.setTextSize(1);
-  oled.setCursor(0, 0);
-  oled.println("GARDEN SENSORS");
-  
-  // Temperature with bar graph
-  oled.setCursor(0, 12);
-  oled.print("Temp: ");
-  oled.print(String(gardenData.temperature, 1));
-  oled.print("C");
-  
-  // Temperature bar (0-50°C scale)
-  int tempBar = map(gardenData.temperature, 0, 50, 0, 100);
-  tempBar = constrain(tempBar, 0, 100);
-  oled.drawRect(0, 22, 102, 6, SSD1306_WHITE);
-  oled.fillRect(1, 23, tempBar, 4, SSD1306_WHITE);
-  
-  // Humidity
-  oled.setCursor(0, 32);
-  oled.print("Humidity: ");
-  oled.print(String(gardenData.humidity, 1));
-  oled.print("%");
-  
-  // Soil moisture with bar
-  oled.setCursor(0, 42);
-  oled.print("Soil: ");
-  oled.print(String(gardenData.soilMoisture));
-  oled.print("%");
-  
-  int soilBar = map(gardenData.soilMoisture, 0, 100, 0, 100);
-  oled.drawRect(0, 52, 102, 6, SSD1306_WHITE);
-  oled.fillRect(1, 53, soilBar, 4, SSD1306_WHITE);
-  
-  // Status icons on the right
-  oled.setCursor(110, 12);
-  oled.print(gardenData.rainDetected ? "R" : ".");
-  oled.setCursor(110, 22);
-  oled.print(gardenData.fireDetected ? "F" : ".");
-  oled.setCursor(110, 32);
-  oled.print(gardenData.pumpRunning ? "P" : ".");
-}
-
-void displayOLEDPage2() {
-  // Page 2: Relay status visualization
-  oled.setTextSize(1);
-  oled.setCursor(0, 0);
-  oled.println("RELAY STATUS");
-  
-  // Draw 8 relay boxes in 2 rows
-  for (int i = 0; i < 8; i++) {
-    int x = (i % 4) * 30;
-    int y = 15 + (i / 4) * 20;
-    
-    // Draw relay box
-    oled.drawRect(x, y, 25, 15, SSD1306_WHITE);
-    
-    // Fill if relay is ON
-    if (relayDevices[i].isOn) {
-      oled.fillRect(x + 1, y + 1, 23, 13, SSD1306_WHITE);
-      oled.setTextColor(SSD1306_BLACK);
-    } else {
-      oled.setTextColor(SSD1306_WHITE);
-    }
-    
-    // Relay number
-    oled.setCursor(x + 8, y + 4);
-    oled.print(String(i + 1));
-    
-    oled.setTextColor(SSD1306_WHITE);
-  }
-  
-  // Relay names at bottom
-  oled.setCursor(0, 55);
-  oled.setTextSize(1);
-  String relayInfo = "";
-  for (int i = 0; i < 8; i++) {
-    if (relayDevices[i].isOn) {
-      relayInfo += String(i + 1);
-    }
-  }
-  oled.print("ON: " + (relayInfo.length() > 0 ? relayInfo : "None"));
-}
-
-void displayOLEDPage3() {
-  // Page 3: Door status and system info
-  oled.setTextSize(1);
-  oled.setCursor(0, 0);
-  oled.println("SYSTEM STATUS");
-  
-  // Connection status
-  oled.setCursor(0, 12);
-  oled.print("Socket: ");
-  oled.println(socketHubConnected ? "OK" : "OFF");
-  
-  oled.setCursor(0, 22);
-  oled.print("Doors:  ");
-  oled.println(doorHubConnected ? "OK" : "OFF");
-  
-  // Door count
-  int onlineDoors = 0;
-  for (int i = 0; i < TOTAL_DEVICES; i++) {
-    if (devices[i].isOnline) onlineDoors++;
-  }
-  
-  oled.setCursor(0, 32);
-  oled.print("Online: ");
-  oled.print(String(onlineDoors));
-  oled.print("/");
-  oled.println(String(TOTAL_DEVICES));
-  
-  // Time and uptime
-  oled.setCursor(0, 42);
-  oled.print("Time: ");
-  oled.println(gardenData.currentTime);
-  
-  oled.setCursor(0, 52);
-  oled.print("Up: ");
-  oled.print(String((millis() - systemUptime) / 60000));
-  oled.print("m");
-  
-  // RGB status indicator (small circle)
-  int rgbX = 100;
-  int rgbY = 52;
-  oled.fillCircle(rgbX, rgbY, 4, SSD1306_WHITE);
-  if (currentGardenStatus == STATUS_GOOD) {
-    // Draw a dot in center for "green"
-    oled.fillCircle(rgbX, rgbY, 2, SSD1306_BLACK);
-  }
-}
-
-// ===== RELAY STATUS LED FUNCTIONS =====
-void updateRelayStatusLEDs() {
+bool anyHighPowerRelayActive() {
   for (int i = 0; i < TOTAL_RELAY_DEVICES; i++) {
-    if (relayDevices[i].isOn) {
-      // Blink LED when relay is ON
-      bool blinkState = (millis() / 250) % 2;
-      digitalWrite(relayDevices[i].statusLedPin, blinkState ? HIGH : LOW);
-    } else {
-      digitalWrite(relayDevices[i].statusLedPin, LOW);
+    if (relayDevices[i].powerSafeMode && relayDevices[i].isOn) {
+      return true;
     }
   }
-}
-
-// ===== TOUCH SENSOR FUNCTIONS =====
-void handleLocalTouchSensors() {
-  for (int i = 0; i < TOTAL_RELAY_DEVICES; i++) {
-    if (relayDevices[i].localControl) {
-      checkTouchSensor(i);
-    }
-  }
-}
-
-void checkTouchSensor(int relayIndex) {
-  if (relayIndex < 0 || relayIndex >= TOTAL_RELAY_DEVICES) return;
-  
-  bool touchState = !digitalRead(relayDevices[relayIndex].touchPin); // Inverted for pullup
-  static bool lastTouchStates[TOTAL_RELAY_DEVICES] = {false};
-  
-  // Detect rising edge (touch pressed)
-  if (touchState && !lastTouchStates[relayIndex]) {
-    unsigned long touchTime = millis();
-    
-    // Debounce - ignore touches within 500ms
-    if (touchTime - relayDevices[relayIndex].lastTouchTime > 500) {
-      toggleRelay(relayIndex, "Local touch control");
-      relayDevices[relayIndex].lastTouchTime = touchTime;
-      localTouchCommands++;
-      
-      Serial.println("[TOUCH] " + relayDevices[relayIndex].deviceName + " toggled locally");
-    }
-  }
-  
-  lastTouchStates[relayIndex] = touchState;
+  return false;
 }
 
 // ===== RGB FUNCTIONS =====
@@ -973,7 +1095,7 @@ void updateRGBStatus() {
 
 GardenStatus determineGardenStatus() {
   if (gardenData.fireDetected) return STATUS_ERROR;
-  if (!socketHubConnected && !doorHubConnected) return STATUS_OFFLINE;
+  if (!socketHubConnected) return STATUS_OFFLINE;
   if (gardenData.rainDetected) return STATUS_RAIN;
   if (gardenData.pumpRunning) return STATUS_WATERING;
   if (gardenData.soilMoisture < soilMoistureThreshold) return STATUS_DRY;
@@ -988,34 +1110,29 @@ void setRGBColor(int red, int green, int blue) {
   analogWrite(RGB_BLUE_PIN, blue);
 }
 
-void handleRGBTest() {
-  Serial.println("[RGB] Running test sequence...");
-  gardenData.rgbStatus = "Testing";
-  
-  setRGBColor(255, 0, 0); delay(500);
-  setRGBColor(0, 255, 0); delay(500);
-  setRGBColor(0, 0, 255); delay(500);
-  setRGBColor(255, 255, 0); delay(500);
-  setRGBColor(128, 0, 128); delay(500);
-  setRGBColor(64, 64, 64); delay(500);
-  
-  updateRGBStatus();
-  Serial.println("[RGB] ✓ Test complete");
-}
-
 // ===== RELAY CONTROL FUNCTIONS =====
 void toggleRelay(int deviceIndex, String reason) {
   if (deviceIndex < 0 || deviceIndex >= TOTAL_RELAY_DEVICES) return;
   
   relayDevices[deviceIndex].isOn = !relayDevices[deviceIndex].isOn;
-  digitalWrite(relayDevices[deviceIndex].relayPin, relayDevices[deviceIndex].isOn ? HIGH : LOW); // Active HIGH
+  
+  if (relayDevices[deviceIndex].activeHigh) {
+    digitalWrite(relayDevices[deviceIndex].relayPin, relayDevices[deviceIndex].isOn ? HIGH : LOW);
+  } else {
+    digitalWrite(relayDevices[deviceIndex].relayPin, relayDevices[deviceIndex].isOn ? LOW : HIGH);
+  }
+  
+  delay(20);
+  
   relayDevices[deviceIndex].lastToggle = millis();
   relayDevices[deviceIndex].status = relayDevices[deviceIndex].isOn ? "on" : "off";
   
   relayCommands++;
   
+  String triggerType = relayDevices[deviceIndex].activeHigh ? "HIGH" : "LOW";
   Serial.println("[RELAY] " + relayDevices[deviceIndex].deviceName + " TOGGLED to " + 
-                String(relayDevices[deviceIndex].isOn ? "ON" : "OFF") + " - " + reason);
+                String(relayDevices[deviceIndex].isOn ? "ON" : "OFF") + " - " + reason +
+                " (Trigger: " + triggerType + ")");
   
   sendRelayDeviceStatus(deviceIndex);
 }
@@ -1023,15 +1140,27 @@ void toggleRelay(int deviceIndex, String reason) {
 void setRelayState(int deviceIndex, bool state, String reason) {
   if (deviceIndex < 0 || deviceIndex >= TOTAL_RELAY_DEVICES) return;
   
+  if (relayDevices[deviceIndex].isOn == state) return;
+  
   relayDevices[deviceIndex].isOn = state;
-  digitalWrite(relayDevices[deviceIndex].relayPin, state ? HIGH : LOW); // Active HIGH
+  
+  if (relayDevices[deviceIndex].activeHigh) {
+    digitalWrite(relayDevices[deviceIndex].relayPin, state ? HIGH : LOW);
+  } else {
+    digitalWrite(relayDevices[deviceIndex].relayPin, state ? LOW : HIGH);
+  }
+  
+  delay(20);
+  
   relayDevices[deviceIndex].lastToggle = millis();
   relayDevices[deviceIndex].status = state ? "on" : "off";
   
   relayCommands++;
   
+  String triggerType = relayDevices[deviceIndex].activeHigh ? "HIGH" : "LOW";
   Serial.println("[RELAY] " + relayDevices[deviceIndex].deviceName + " SET to " + 
-                String(state ? "ON" : "OFF") + " - " + reason);
+                String(state ? "ON" : "OFF") + " - " + reason +
+                " (Trigger: " + triggerType + ")");
   
   sendRelayDeviceStatus(deviceIndex);
 }
@@ -1049,7 +1178,6 @@ void handleRelayCommand(String serialNumber, String action) {
   int deviceIndex = findRelayDeviceBySerial(serialNumber);
   
   if (deviceIndex < 0) {
-    Serial.println("[RELAY] ✗ Device not found: " + serialNumber);
     sendRelayResponse(serialNumber, action, false, "Device not found");
     return;
   }
@@ -1072,37 +1200,12 @@ void handleRelayCommand(String serialNumber, String action) {
     success = true;
     result = "OFF";
     
-    if (deviceIndex == 1) { // Alarm device
-      relayDevices[deviceIndex].fireOverride = true;
-      Serial.println("[ALARM] Fire override enabled - manual control");
-    }
-    
-  } else if (action == "RESET_OVERRIDE" && deviceIndex == 1) {
-    relayDevices[deviceIndex].fireOverride = false;
-    success = true;
-    result = "OVERRIDE_RESET";
-    Serial.println("[ALARM] Fire override reset - automatic control restored");
-    
   } else if (action == "STATUS") {
     success = true;
     result = relayDevices[deviceIndex].isOn ? "ON" : "OFF";
   }
   
   sendRelayResponse(serialNumber, action, success, result);
-}
-
-void checkFireAlarm() {
-  static bool lastFireState = false;
-  
-  if (gardenData.fireDetected && !lastFireState) {
-    int alarmIndex = 1; // Alarm is relay device index 1
-    if (!relayDevices[alarmIndex].fireOverride) {
-      setRelayState(alarmIndex, true, "Fire detected");
-      Serial.println("[FIRE] 🔥 ALARM ACTIVATED - Fire detected!");
-    }
-  }
-  
-  lastFireState = gardenData.fireDetected;
 }
 
 void sendRelayResponse(String serialNumber, String action, bool success, String result) {
@@ -1112,12 +1215,13 @@ void sendRelayResponse(String serialNumber, String action, bool success, String 
   json += "\"deviceId\":\"" + serialNumber + "\",";
   json += "\"command\":\"" + action + "\",";
   json += "\"type\":\"relay\",";
-  json += "\"mega_processed\":true,";
+  json += "\"relay_type\":\"MIXED\",";
+  json += "\"input_type\":\"4x4_KEYPAD\",";
+  json += "\"power_safe\":true,";
   json += "\"timestamp\":" + String(millis());
   json += "}";
 
   Serial1.println("RESP:" + json);
-  Serial.println("[MEGA→SOCKET] RELAY Response: " + json);
 }
 
 void sendRelayDeviceStatus(int deviceIndex) {
@@ -1128,16 +1232,13 @@ void sendRelayDeviceStatus(int deviceIndex) {
   statusMsg += "\"name\":\"" + relayDevices[deviceIndex].deviceName + "\",";
   statusMsg += "\"state\":\"" + String(relayDevices[deviceIndex].isOn ? "on" : "off") + "\",";
   statusMsg += "\"pin\":" + String(relayDevices[deviceIndex].relayPin) + ",";
-  statusMsg += "\"ledPin\":" + String(relayDevices[deviceIndex].statusLedPin) + ",";
-  statusMsg += "\"touchPin\":" + String(relayDevices[deviceIndex].touchPin) + ",";
+  statusMsg += "\"keypadKey\":\"" + String(relayDevices[deviceIndex].keypadKey) + "\",";
+  statusMsg += "\"activeHigh\":" + String(relayDevices[deviceIndex].activeHigh ? "true" : "false") + ",";
   statusMsg += "\"localControl\":" + String(relayDevices[deviceIndex].localControl ? "true" : "false") + ",";
+  statusMsg += "\"powerSafe\":" + String(relayDevices[deviceIndex].powerSafeMode ? "true" : "false") + ",";
+  statusMsg += "\"inputType\":\"4x4_KEYPAD\",";
   statusMsg += "\"lastToggle\":" + String(relayDevices[deviceIndex].lastToggle) + ",";
-  
-  if (deviceIndex == 1) {
-    statusMsg += "\"fireOverride\":" + String(relayDevices[deviceIndex].fireOverride ? "true" : "false") + ",";
-    statusMsg += "\"fireDetected\":" + String(gardenData.fireDetected ? "true" : "false") + ",";
-  }
-  
+  statusMsg += "\"lastKeyPress\":" + String(relayDevices[deviceIndex].lastKeyPress) + ",";
   statusMsg += "\"timestamp\":" + String(millis());
   statusMsg += "}";
   
@@ -1149,82 +1250,8 @@ void sendRelayStatusToSocket() {
   
   for (int i = 0; i < TOTAL_RELAY_DEVICES; i++) {
     sendRelayDeviceStatus(i);
-    delay(50);
+    delay(150);
   }
-}
-
-// ===== DOOR HUB MESSAGE HANDLING =====
-void handleDoorHubMessage(String message) {
-  if (message.length() == 0) return;
-  
-  message.trim();
-  
-  doorHubConnected = true;
-  lastDoorMessage = millis();
-  
-  Serial.println("[ESP8266_DOOR_HUB→MEGA] " + message);
-  
-  if (message.startsWith("DOOR_HUB_PCA9685_READY")) {
-    Serial.println("[DOOR_HUB] ✓ ESP8266 Door Hub with PCA9685 is ready");
-    
-  } else if (message.startsWith("CHANNELS:")) {
-    String channelInfo = message.substring(9);
-    Serial.println("[DOOR_HUB] ✓ PCA9685 Channels: " + channelInfo);
-    
-  } else if (message.startsWith("RESP:")) {
-    handleDoorHubResponse(message);
-    
-  } else if (message.startsWith("STS:")) {
-    Serial1.println(message);
-    Serial.println("[MEGA→SOCKET] " + message);
-    
-  } else if (message.startsWith("PCA9685_INFO:")) {
-    Serial.println("[DOOR_HUB] PCA9685 Info: " + message);
-    
-  } else if (message.startsWith("STATUS_COMPLETE")) {
-    Serial.println("[DOOR_HUB] ✓ Status update complete");
-    
-  } else if (message.startsWith("TEST_COMPLETE")) {
-    Serial.println("[DOOR_HUB] ✓ Test sequence complete");
-    
-  } else if (message.startsWith("[")) {
-    Serial.println("[DOOR_HUB_DEBUG] " + message);
-    
-  } else {
-    Serial.println("[DOOR_HUB] Unknown: " + message);
-  }
-}
-
-void handleDoorHubResponse(String respMessage) {
-  if (!respMessage.startsWith("RESP:")) return;
-  
-  String jsonData = respMessage.substring(5);
-  
-  String deviceId = extractJsonField(jsonData, "d");
-  String success = extractJsonField(jsonData, "s");
-  String result = extractJsonField(jsonData, "r");
-  String channel = extractJsonField(jsonData, "ch");
-  
-  int deviceIndex = findDeviceBySerial(deviceId);
-  if (deviceIndex >= 0) {
-    devices[deviceIndex].isOnline = true;
-    devices[deviceIndex].lastSeen = millis();
-    devices[deviceIndex].status = (success == "1") ? "online" : "error";
-    
-    String angle = extractJsonField(jsonData, "a");
-    if (angle.length() > 0) {
-      devices[deviceIndex].servoAngle = angle.toInt();
-      devices[deviceIndex].doorOpen = (devices[deviceIndex].servoAngle > 45);
-    }
-    
-    Serial.println("[DOOR_UPDATE] Door " + String(deviceIndex + 1) + " (Ch" + channel + "): " + 
-                   result + " at " + String(devices[deviceIndex].servoAngle) + "°");
-  }
-  
-  Serial1.println(respMessage);
-  responsesForwarded++;
-  
-  Serial.println("[MEGA→SOCKET] Door response forwarded");
 }
 
 // ===== SOCKET HUB MESSAGE HANDLING =====
@@ -1239,20 +1266,13 @@ void handleSocketHubMessage(String message) {
   if (message.startsWith("CMD:")) {
     String cmdData = message.substring(4);
     
+    // User commands get highest priority
+    setUserCommandOverride("Socket command: " + cmdData);
+    
     if (cmdData.indexOf("GARDEN") >= 0) {
       handleGardenSocketCommand(message);
     } else if (cmdData.indexOf("RELAY") >= 0) {
       handleRelaySocketCommand(message);
-    } else {
-      int colonIndex = cmdData.indexOf(':');
-      if (colonIndex > 0 && colonIndex < cmdData.length() - 1) {
-        String serialNumber = cmdData.substring(0, colonIndex);
-        String action = cmdData.substring(colonIndex + 1);
-        
-        if (serialNumber.length() == 32 && serialNumber.startsWith("SERL")) {
-          forwardCommand(serialNumber, action);
-        }
-      }
     }
   }
 }
@@ -1261,52 +1281,25 @@ void handleGardenSocketCommand(String cmdMessage) {
   String cmdData = cmdMessage.substring(4);
 
   if (cmdData == "GARDEN:PUMP_ON") {
-    startPump("Remote command");
+    startPump("User command via socket");
+    sendSocketResponse("PUMP_ON", true, "Pump started by user");
   } else if (cmdData == "GARDEN:PUMP_OFF") {
-    stopPump("Remote command");
+    stopPump("User command via socket");
+    sendSocketResponse("PUMP_OFF", true, "Pump stopped by user");
   } else if (cmdData == "GARDEN:AUTO_WATER_TOGGLE") {
     autoWateringEnabled = !autoWateringEnabled;
-    Serial.println("[GARDEN] Auto watering: " + String(autoWateringEnabled ? "ON" : "OFF"));
+    sendSocketResponse("AUTO_WATER", true, "Auto watering: " + String(autoWateringEnabled ? "ON" : "OFF"));
   } else if (cmdData == "GARDEN:AUTO_LIGHT_TOGGLE") {
     autoLightingEnabled = !autoLightingEnabled;
-    Serial.println("[GARDEN] Auto lighting: " + String(autoLightingEnabled ? "ON" : "OFF"));
+    sendSocketResponse("AUTO_LIGHT", true, "Auto lighting: " + String(autoLightingEnabled ? "ON" : "OFF"));
   } else if (cmdData == "GARDEN:AUTO_FAN_TOGGLE") {
     autoFanEnabled = !autoFanEnabled;
-    Serial.println("[GARDEN] Auto fan: " + String(autoFanEnabled ? "ON" : "OFF"));
-  } else if (cmdData == "GARDEN:RGB_TEST") {
-    handleRGBTest();
-  } else if (cmdData == "GARDEN:LCD_TEST") {
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("LCD TEST MODE");
-    lcd.setCursor(0, 1);
-    lcd.print("All Systems OK");
-    delay(2000);
-    lcd.clear();
-  } else if (cmdData == "GARDEN:OLED_TEST") {
-    oled.clearDisplay();
-    oled.setTextSize(1);
-    oled.setCursor(0, 0);
-    oled.println("OLED TEST MODE");
-    oled.println("");
-    oled.setTextSize(2);
-    oled.println("MEGA HUB");
-    oled.setTextSize(1);
-    oled.println("");
-    oled.println("Graphics Test:");
-    
-    // Draw some test graphics
-    for (int i = 0; i < 128; i += 8) {
-      oled.drawPixel(i, 50, SSD1306_WHITE);
-    }
-    oled.drawRect(0, 55, 128, 8, SSD1306_WHITE);
-    oled.display();
-    delay(3000);
-    oled.clearDisplay();
+    sendSocketResponse("AUTO_FAN", true, "Auto fan: " + String(autoFanEnabled ? "ON" : "OFF"));
+  } else if (cmdData.startsWith("GARDEN:RGB_")) {
+    handleRGBCommand(cmdData);
+  } else if (cmdData.startsWith("GARDEN:SET_")) {
+    handleThresholdCommand(cmdData);
   }
-
-  String response = "RESP:{\"success\":true,\"command\":\"" + cmdData + "\",\"type\":\"garden\",\"rgb_status\":\"" + gardenData.rgbStatus + "\"}";
-  Serial1.println(response);
 }
 
 void handleRelaySocketCommand(String cmdMessage) {
@@ -1314,7 +1307,6 @@ void handleRelaySocketCommand(String cmdMessage) {
   
   int colonIndex = cmdData.indexOf(':');
   if (colonIndex <= 0) {
-    Serial.println("[RELAY] ✗ Invalid relay format: " + cmdMessage);
     return;
   }
   
@@ -1322,136 +1314,171 @@ void handleRelaySocketCommand(String cmdMessage) {
   String action = cmdData.substring(colonIndex + 1);
   
   if (serialNumber.length() != 32 || !serialNumber.startsWith("RELAY")) {
-    Serial.println("[RELAY] ✗ Invalid relay serial: " + serialNumber);
     sendRelayResponse(serialNumber, action, false, "Invalid serial format");
     return;
   }
   
-  Serial.println("[RELAY] Processing: " + serialNumber + " -> " + action);
+  // User relay commands get priority
+  setUserCommandOverride("Relay command: " + serialNumber + ":" + action);
+  
   handleRelayCommand(serialNumber, action);
 }
 
-void forwardCommand(String serialNumber, String action) {
-  Serial.println("\n[FORWARD] Processing command for ESP8266 Door Hub");
-  Serial.println("[FORWARD] Serial: " + serialNumber);
-  Serial.println("[FORWARD] Action: " + action);
+// ===== SOCKET COMMUNICATION FUNCTIONS =====
+void sendSocketResponse(String command, bool success, String message) {
+  String response = "RESP:{";
+  response += "\"success\":" + String(success ? "true" : "false") + ",";
+  response += "\"command\":\"" + command + "\",";
+  response += "\"message\":\"" + message + "\",";
+  response += "\"type\":\"garden\",";
+  response += "\"user_override\":" + String(userCommandActive ? "true" : "false") + ",";
+  response += "\"timestamp\":" + String(millis());
+  response += "}";
   
-  if (serialNumber.length() > 32) {
-    Serial.println("[FORWARD] ✗ Serial too long: " + String(serialNumber.length()));
-    sendErrorResponse(serialNumber, action, "Serial number too long");
-    return;
-  }
-  
-  int deviceIndex = findDeviceBySerial(serialNumber);
-  if (deviceIndex < 0) {
-    Serial.println("[FORWARD] ✗ Device not found");
-    sendErrorResponse(serialNumber, action, "Device not found");
-    return;
-  }
-  
-  Serial.println("[FORWARD] Found device at index: " + String(deviceIndex) + 
-                 " (PCA9685 Ch" + String(devices[deviceIndex].pwmChannel) + ")");
-  
-  devices[deviceIndex].lastAction = action;
-  devices[deviceIndex].lastSeen = millis();
-  
-  String forwardCmd = "CMD:" + serialNumber + ":" + action;
-  Serial2.println(forwardCmd);
-  delay(10);
-  
-  commandsProcessed++;
-  
-  Serial.println("[FORWARD] ✓ Sent to ESP8266 Door Hub");
-  Serial.println("[MEGA→ESP8266_DOOR_HUB] " + forwardCmd);
+  Serial1.println(response);
 }
 
-// ===== SYSTEM FUNCTIONS =====
-int findDeviceBySerial(String serialNumber) {
-  for (int i = 0; i < TOTAL_DEVICES; i++) {
-    if (devices[i].serialNumber == serialNumber) {
-      return i;
-    }
-  }
-  return -1;
+void sendSocketStatus(String statusType, String data) {
+  String statusMsg = "STS:GARDEN:{";
+  statusMsg += "\"status_type\":\"" + statusType + "\",";
+  statusMsg += "\"data\":\"" + data + "\",";
+  statusMsg += "\"user_override\":" + String(userCommandActive ? "true" : "false") + ",";
+  statusMsg += "\"emergency_mode\":" + String(emergencyMode ? "true" : "false") + ",";
+  statusMsg += "\"timestamp\":" + String(millis());
+  statusMsg += "}";
+  
+  Serial1.println(statusMsg);
 }
 
-String extractJsonField(String json, String fieldName) {
-  String searchKey = "\"" + fieldName + "\":";
-  int startIndex = json.indexOf(searchKey);
-  if (startIndex == -1) return "";
-
-  startIndex += searchKey.length();
-  while (startIndex < json.length() && (json.charAt(startIndex) == ' ' || json.charAt(startIndex) == '"')) {
-    startIndex++;
-  }
-
-  int endIndex = startIndex;
-  while (endIndex < json.length() && json.charAt(endIndex) != ',' && json.charAt(endIndex) != '}' && json.charAt(endIndex) != '"') {
-    endIndex++;
-  }
-
-  return json.substring(startIndex, endIndex);
+void sendGardenData() {
+  String gardenDataMsg = "GARDEN_DATA:{";
+  gardenDataMsg += "\"temperature\":" + String(gardenData.temperature, 1) + ",";
+  gardenDataMsg += "\"humidity\":" + String(gardenData.humidity, 1) + ",";
+  gardenDataMsg += "\"soil_moisture\":" + String(gardenData.soilMoisture) + ",";
+  gardenDataMsg += "\"light_level\":" + String(gardenData.lightLevel) + ",";
+  gardenDataMsg += "\"rain_detected\":" + String(gardenData.rainDetected ? "true" : "false") + ",";
+  gardenDataMsg += "\"fire_detected\":" + String(gardenData.fireDetected ? "true" : "false") + ",";
+  gardenDataMsg += "\"pump_running\":" + String(gardenData.pumpRunning ? "true" : "false") + ",";
+  gardenDataMsg += "\"user_override\":" + String(userCommandActive ? "true" : "false") + ",";
+  gardenDataMsg += "\"emergency_mode\":" + String(emergencyMode ? "true" : "false") + ",";
+  gardenDataMsg += "\"system_stable\":" + String(systemStable ? "true" : "false") + ",";
+  gardenDataMsg += "\"current_time\":\"" + gardenData.currentTime + "\",";
+  gardenDataMsg += "\"rgb_status\":\"" + gardenData.rgbStatus + "\",";
+  gardenDataMsg += "\"timestamp\":" + String(millis());
+  gardenDataMsg += "}";
+  
+  Serial1.println(gardenDataMsg);
 }
 
-void sendErrorResponse(String serialNumber, String action, String error) {
-  String json = "{";
-  json += "\"success\":false,";
-  json += "\"result\":\"" + error + "\",";
-  json += "\"deviceId\":\"" + serialNumber + "\",";
-  json += "\"command\":\"" + action + "\",";
-  json += "\"mega_processed\":true,";
-  json += "\"timestamp\":" + String(millis());
-  json += "}";
+void handleRGBCommand(String cmdData) {
+  if (cmdData == "GARDEN:RGB_TEST") {
+    testRGBSequence();
+    sendSocketResponse("RGB_TEST", true, "RGB test sequence completed");
+  } else if (cmdData == "GARDEN:RGB_AUTO") {
+    // Resume automatic RGB control
+    sendSocketResponse("RGB_AUTO", true, "RGB auto mode enabled");
+  } else if (cmdData.startsWith("GARDEN:RGB_MANUAL:")) {
+    String colorData = cmdData.substring(18);
+    setManualRGBColor(colorData);
+  }
+}
 
-  Serial1.println("RESP:" + json);
+void handleThresholdCommand(String cmdData) {
+  if (cmdData.startsWith("GARDEN:SET_SOIL_THRESHOLD:")) {
+    int value = cmdData.substring(26).toInt();
+    soilMoistureThreshold = constrain(value, 0, 100);
+    sendSocketResponse("SET_SOIL_THRESHOLD", true, "Soil threshold set to " + String(value) + "%");
+  } else if (cmdData.startsWith("GARDEN:SET_LIGHT_THRESHOLD:")) {
+    int value = cmdData.substring(27).toInt();
+    lightThreshold = constrain(value, 0, 1000);
+    sendSocketResponse("SET_LIGHT_THRESHOLD", true, "Light threshold set to " + String(value));
+  }
+}
+
+void testRGBSequence() {
+  setRGBColor(255, 0, 0); delay(500);
+  setRGBColor(0, 255, 0); delay(500);
+  setRGBColor(0, 0, 255); delay(500);
+  setRGBColor(255, 255, 255); delay(500);
+  setRGBColor(0, 0, 0);
+}
+
+void setManualRGBColor(String colorData) {
+  int comma1 = colorData.indexOf(',');
+  int comma2 = colorData.indexOf(',', comma1 + 1);
+  
+  if (comma1 > 0 && comma2 > comma1) {
+    int red = colorData.substring(0, comma1).toInt();
+    int green = colorData.substring(comma1 + 1, comma2).toInt();
+    int blue = colorData.substring(comma2 + 1).toInt();
+    
+    red = constrain(red, 0, 255);
+    green = constrain(green, 0, 255);
+    blue = constrain(blue, 0, 255);
+    
+    setRGBColor(red, green, blue);
+    sendSocketResponse("RGB_MANUAL", true, "RGB set to " + String(red) + "," + String(green) + "," + String(blue));
+  } else {
+    sendSocketResponse("RGB_MANUAL", false, "Invalid color format");
+  }
 }
 
 void checkSystemHealth() {
   if (socketHubConnected && (millis() - lastSocketMessage > 120000)) {
     socketHubConnected = false;
-    Serial.println("[HEALTH] ✗ Socket Hub timeout");
+    sendSocketStatus("disconnected", "Socket hub timeout");
   }
-
-  if (doorHubConnected && (millis() - lastDoorMessage > 120000)) {
-    doorHubConnected = false;
-    Serial.println("[HEALTH] ✗ ESP8266 Door Hub timeout");
-  }
-
-  for (int i = 0; i < TOTAL_DEVICES; i++) {
-    if (devices[i].isOnline && (millis() - devices[i].lastSeen > 300000)) {
-      devices[i].isOnline = false;
-      devices[i].status = "timeout";
-      Serial.println("[HEALTH] ✗ Door " + String(i + 1) + " timeout");
-    }
+  
+  if (!anyHighPowerRelayActive()) {
+    systemStable = true;
   }
 }
 
 void sendSystemHeartbeat() {
-  Serial.println("[HEARTBEAT] Mega Garden Hub (Integrated) - uptime: " + String((millis() - systemUptime) / 1000) + "s");
-  Serial.println("           Sensors: " + String(sensorReadings) + " readings");
-  Serial.println("           Garden: " + String(gardenData.temperature, 1) + "°C, " + 
-                 String(gardenData.soilMoisture) + "% soil, pump " + 
-                 String(gardenData.pumpRunning ? "ON" : "OFF"));
-  Serial.println("           RGB: " + gardenData.rgbStatus + " | LCD Page: " + String(gardenData.lcdPage + 1) + " | OLED Page: " + String(gardenData.oledPage + 1));
-  Serial.println("           Relays: " + String(relayCommands) + " remote + " + String(localTouchCommands) + " local commands");
-  Serial.println("           Doors: ESP8266 + PCA9685 (" + String(TOTAL_DEVICES) + " channels)");
-  Serial.println("           Fire: " + String(gardenData.fireDetected ? "DETECTED" : "NONE"));
+  // Simple heartbeat without debug output
+  sendSocketStatus("heartbeat", "Garden hub running");
 }
 
 void printSystemStatus() {
-  Serial.println("\n======= MEGA GARDEN HUB STATUS (INTEGRATED SYSTEM) =======");
+  Serial.println("\n======= MEGA GARDEN HUB STATUS (4x4 KEYPAD) =======");
   Serial.println("Hub ID: " + String(HUB_ID));
   Serial.println("Version: " + String(FIRMWARE_VERSION));
+  Serial.println("Input Method: 4x4 Matrix Keypad");
   Serial.println("Uptime: " + String((millis() - systemUptime) / 1000) + " seconds");
-  Serial.println("Commands: " + String(commandsProcessed) + " | Responses: " + String(responsesForwarded));
-  Serial.println("Sensor Readings: " + String(sensorReadings) + " | Relay Commands: " + String(relayCommands));
-  Serial.println("Local Touch Commands: " + String(localTouchCommands));
+  Serial.println("Key Commands: " + String(localKeyCommands));
+  Serial.println("System Stable: " + String(systemStable ? "YES" : "NO"));
 
-  Serial.println("\n--- Hub Connections ---");
+  Serial.println("\n--- 4x4 Keypad Configuration ---");
+  Serial.println("Keypad Type: 4x4 Matrix (16 keys)");
+  Serial.print("Row Pins: ");
+  for (int i = 0; i < KEYPAD_ROWS; i++) {
+    Serial.print(String(keypadRowPins[i]) + " ");
+  }
+  Serial.println();
+  Serial.print("Col Pins: ");
+  for (int i = 0; i < KEYPAD_COLS; i++) {
+    Serial.print(String(keypadColPins[i]) + " ");
+  }
+  Serial.println();
+  
+  Serial.println("\n--- Key Mappings ---");
+  Serial.println("Relay Control: 1-9,0 (keys 1-9 = relays 1-9, key 0 = relay 10)");
+  Serial.println("A = Auto Water Toggle");
+  Serial.println("B = Auto Light Toggle"); 
+  Serial.println("C = Auto Fan Toggle");
+  Serial.println("D = Emergency Stop");
+  Serial.println("* = System Status");
+  Serial.println("# = All Relays Off");
+
+  Serial.println("\n--- I2C Device Status ---");
+  Serial.println("RTC DS3231: " + String(rtcAvailable ? "CONNECTED" : "DISCONNECTED"));
+  Serial.println("LCD 16x2: " + String(lcdAvailable ? "CONNECTED" : "DISCONNECTED"));
+  Serial.println("OLED 0.96\": " + String(oledAvailable ? "CONNECTED" : "DISCONNECTED"));
+
+  Serial.println("\n--- Socket Hub Connection ---");
   Serial.println("Socket Hub: " + String(socketHubConnected ? "CONNECTED" : "DISCONNECTED"));
-  Serial.println("Door Hub (ESP8266 + PCA9685): " + String(doorHubConnected ? "CONNECTED" : "DISCONNECTED"));
 
-  Serial.println("\n--- Integrated Garden System ---");
+  Serial.println("\n--- Garden System ---");
   Serial.println("Temperature: " + String(gardenData.temperature, 1) + "°C");
   Serial.println("Humidity: " + String(gardenData.humidity, 1) + "%");
   Serial.println("Soil Moisture: " + String(gardenData.soilMoisture) + "%");
@@ -1459,47 +1486,36 @@ void printSystemStatus() {
   Serial.println("Rain: " + String(gardenData.rainDetected ? "DETECTED" : "NONE"));
   Serial.println("Fire: " + String(gardenData.fireDetected ? "DETECTED" : "NONE"));
   Serial.println("Pump: " + String(gardenData.pumpRunning ? "RUNNING" : "STOPPED"));
-  Serial.println("RGB Status: " + gardenData.rgbStatus);
-  Serial.println("LCD Page: " + String(gardenData.lcdPage + 1) + "/" + String(LCD_PAGES) + " (I2C 0x" + String(LCD_I2C_ADDRESS, HEX) + ")");
-  Serial.println("OLED Page: " + String(gardenData.oledPage + 1) + "/" + String(OLED_PAGES) + " (I2C 0x" + String(OLED_I2C_ADDRESS, HEX) + ")");
+  Serial.println("Current Time: " + gardenData.currentTime);
+
+  Serial.println("\n--- 10 Relay Status ---");
+  for (int i = 0; i < TOTAL_RELAY_DEVICES; i++) {
+    String triggerType = relayDevices[i].activeHigh ? "HIGH" : "LOW";
+    String powerMode = relayDevices[i].powerSafeMode ? "SAFE" : "NORMAL";
+    Serial.println("Relay " + String(i + 1) + " (" + relayDevices[i].deviceName + "): " + 
+                   String(relayDevices[i].isOn ? "ON" : "OFF") + 
+                   " | Pin " + String(relayDevices[i].relayPin) + 
+                   " | Key '" + String(relayDevices[i].keypadKey) + 
+                   "' | Trigger " + triggerType + 
+                   " | Power " + powerMode);
+  }
+
+  Serial.println("\n--- Keypad Control System ---");
+  Serial.println("Input Type: 4x4 Matrix Keypad");
+  Serial.println("Total Keys: 16");
+  Serial.println("Total Key Commands: " + String(localKeyCommands));
+  Serial.println("Debounce Time: " + String(KEY_DEBOUNCE_TIME) + "ms");
 
   Serial.println("\n--- Automation Settings ---");
   Serial.println("Auto Watering: " + String(autoWateringEnabled ? "ENABLED" : "DISABLED"));
   Serial.println("Auto Lighting: " + String(autoLightingEnabled ? "ENABLED" : "DISABLED"));
   Serial.println("Auto Fan: " + String(autoFanEnabled ? "ENABLED" : "DISABLED"));
 
-  Serial.println("\n--- 8-Channel Relay Status (Active HIGH) ---");
-  for (int i = 0; i < TOTAL_RELAY_DEVICES; i++) {
-    Serial.println("Relay " + String(i + 1) + " (" + relayDevices[i].deviceName + "): " + 
-                   String(relayDevices[i].isOn ? "ON" : "OFF") + 
-                   " | Pin " + String(relayDevices[i].relayPin) + 
-                   " | LED " + String(relayDevices[i].statusLedPin) + 
-                   " | Touch " + String(relayDevices[i].touchPin) +
-                   " | Local: " + String(relayDevices[i].localControl ? "Y" : "N"));
-    
-    if (i == 1) {
-      Serial.println("  └─ Fire Override: " + String(relayDevices[i].fireOverride ? "YES" : "NO"));
-    }
-  }
-
-  Serial.println("\n--- Door Devices (ESP8266 + PCA9685) ---");
-  int onlineCount = 0;
-  for (int i = 0; i < TOTAL_DEVICES; i++) {
-    if (devices[i].isOnline) onlineCount++;
-    Serial.println("Door " + String(i + 1) + " (Ch" + String(devices[i].pwmChannel) + "): " + 
-                   String(devices[i].isOnline ? "ONLINE" : "OFFLINE") + " | " + 
-                   String(devices[i].doorOpen ? "OPEN" : "CLOSED") + " | " + 
-                   String(devices[i].servoAngle) + "° | " + devices[i].status + " | " +
-                   devices[i].doorType);
-  }
-
-  Serial.println("\nOnline Doors: " + String(onlineCount) + "/" + String(TOTAL_DEVICES));
-  Serial.println("Free RAM: " + String(freeMemory()) + " bytes");
   Serial.println("==========================================================\n");
 }
 
 int freeMemory() {
   extern int __heap_start, *__brkval;
   int v;
-  return (int)&v - (__brkval == 0 ? (int)&__heap_start : (int)__brkval);
+  return (int)&v - (__brkval == 0 ? (int)&__heap_start : (int)&__brkval);
 }
