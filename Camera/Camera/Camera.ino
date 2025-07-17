@@ -1,7 +1,4 @@
 #include "esp_camera.h"
-#include "fd_forward.h"
-#include "fr_forward.h"
-#include "fr_flash.h"
 #include <WiFi.h>
 #include <WebServer.h>
 #include <WebSocketsClient.h>
@@ -23,14 +20,32 @@
   #define DEBUG_PRINTF(x, ...)
 #endif
 
-// Camera model - AI Thinker
+// Camera model - AI Thinker ESP32-CAM
 #define CAMERA_MODEL_AI_THINKER
-#include "camera_pins.h"
+
+// Camera pin definitions for AI Thinker ESP32-CAM
+#define PWDN_GPIO_NUM     32
+#define RESET_GPIO_NUM    -1
+#define XCLK_GPIO_NUM      0
+#define SIOD_GPIO_NUM     26
+#define SIOC_GPIO_NUM     27
+
+#define Y9_GPIO_NUM       35
+#define Y8_GPIO_NUM       34
+#define Y7_GPIO_NUM       39
+#define Y6_GPIO_NUM       36
+#define Y5_GPIO_NUM       21
+#define Y4_GPIO_NUM       19
+#define Y3_GPIO_NUM       18
+#define Y2_GPIO_NUM        5
+#define VSYNC_GPIO_NUM    25
+#define HREF_GPIO_NUM     23
+#define PCLK_GPIO_NUM     22
 
 // Device configuration
 #define SERIAL_NUMBER "SERL12ESP32CAM001"
 #define DEVICE_TYPE "CAMERA"
-#define FIRMWARE_VERSION "1.4.0"
+#define FIRMWARE_VERSION "1.5.0"
 
 // Network configuration
 const char* HOTSPOT_SSID = "ESP32-CAM-Config";
@@ -58,11 +73,6 @@ const unsigned long FRAME_INTERVAL = 100;
 const unsigned long RECONNECT_BASE_INTERVAL = 10000;
 const unsigned long WATCHDOG_TIMEOUT = 120000;
 
-// Face detection configuration
-static mtmn_config_t mtmn_config = {0};
-static face_id_name_list st_face_list;
-static dl_matrix3du_t *aligned_face = NULL;
-
 // Global objects
 WebServer httpServer(80);
 WebSocketsClient webSocket;
@@ -74,7 +84,6 @@ struct CameraState {
   bool sdCardAvailable = false;
   bool streamActive = false;
   bool motionDetectionEnabled = false;
-  bool faceDetectionEnabled = false;
   bool rtmpStreamActive = false;
   bool isConnected = false;
   bool namespaceConnected = false;
@@ -86,6 +95,7 @@ struct CameraState {
   unsigned long lastStatusUpdate = 0;
   unsigned long lastPingTime = 0;
   unsigned long lastWatchdog = 0;
+  unsigned long lastMotionTime = 0;
 } state;
 
 // Camera settings
@@ -108,6 +118,13 @@ String rtmpUrl = "";
 // Buffers
 static char websocketPath[256];
 static char jsonBuffer[512];
+
+// Forward declarations
+void sendCommandResponse(const String& requestId, bool success, const String& action, const String& message, const String& additionalData = "");
+void handleCaptureCommand(JsonDocument& doc, const String& requestId);
+void handleResolutionCommand(JsonDocument& doc, const String& requestId);
+void handleQualityCommand(JsonDocument& doc, const String& requestId);
+void sendSocketIOEvent(const char* eventName, const String& jsonData);
 
 // HTML Configuration Page
 const char CONFIG_HTML[] PROGMEM = R"rawliteral(
@@ -138,7 +155,7 @@ input[type="submit"]:hover{background:#0056b3}
 <div class="info">
 <strong>Device:</strong> %s<br>
 <strong>Version:</strong> %s<br>
-<strong>Features:</strong> Face Detection, Motion Detection, RTMP Streaming
+<strong>Features:</strong> Video Streaming, Motion Detection, RTMP
 </div>
 <form action='/save_config' method='POST'>
 <div class='form-group'>
@@ -158,10 +175,6 @@ input[type="submit"]:hover{background:#0056b3}
 </select>
 </div>
 <div class="features">
-<div class="feature">
-<input type="checkbox" id="faceDetection" name="faceDetection" checked>
-<label for="faceDetection">Enable Face Detection</label>
-</div>
 <div class="feature">
 <input type="checkbox" id="motionDetection" name="motionDetection" checked>
 <label for="motionDetection">Enable Motion Detection</label>
@@ -186,7 +199,7 @@ void initEEPROM() {
 String readEEPROMString(int address, int maxLength) {
   String result = "";
   result.reserve(maxLength);
-  for (int i = 0; i < maxLength && i < maxLength; i++) {
+  for (int i = 0; i < maxLength; i++) {
     char c = EEPROM.read(address + i);
     if (c == 0) break;
     result += c;
@@ -208,7 +221,6 @@ void saveConfiguration() {
   StaticJsonDocument<200> config;
   config["quality"] = settings.quality;
   config["frameSize"] = settings.frameSize;
-  config["faceDetection"] = state.faceDetectionEnabled;
   config["motionDetection"] = state.motionDetectionEnabled;
   
   String configStr;
@@ -223,7 +235,6 @@ void loadConfiguration() {
     if (deserializeJson(config, configStr) == DeserializationError::Ok) {
       settings.quality = config["quality"] | 12;
       settings.frameSize = (framesize_t)(config["frameSize"] | FRAMESIZE_QVGA);
-      state.faceDetectionEnabled = config["faceDetection"] | true;
       state.motionDetectionEnabled = config["motionDetection"] | true;
       DEBUG_PRINT("[Config] Loaded from EEPROM");
     }
@@ -279,7 +290,6 @@ void handleUDP() {
         String ssid = doc["ssid"].as<String>();
         String password = doc["password"].as<String>();
         int quality = doc["quality"] | 12;
-        bool faceDetection = doc["faceDetection"] | true;
         bool motionDetection = doc["motionDetection"] | true;
         
         DEBUG_PRINT("[UDP] Received WiFi credentials and config");
@@ -290,7 +300,6 @@ void handleUDP() {
         
         // Save configuration
         settings.quality = quality;
-        state.faceDetectionEnabled = faceDetection;
         state.motionDetectionEnabled = motionDetection;
         saveConfiguration();
         
@@ -315,82 +324,10 @@ void handleUDP() {
   }
 }
 
-// =================== FACE DETECTION ===================
-
-void initFaceDetection() {
-  DEBUG_PRINT("[Face] Initializing face detection...");
-  
-  mtmn_config.type = FAST;
-  mtmn_config.min_face = 80;
-  mtmn_config.pyramid = 0.707;
-  mtmn_config.pyramid_times = 4;
-  mtmn_config.p_threshold.score = 0.6;
-  mtmn_config.p_threshold.nms = 0.7;
-  mtmn_config.p_threshold.candidate_number = 20;
-  mtmn_config.r_threshold.score = 0.7;
-  mtmn_config.r_threshold.nms = 0.7;
-  mtmn_config.r_threshold.candidate_number = 10;
-  mtmn_config.o_threshold.score = 0.7;
-  mtmn_config.o_threshold.nms = 0.7;
-  mtmn_config.o_threshold.candidate_number = 1;
-  
-  face_id_init(&st_face_list, FACE_ID_SAVE_NUMBER, ENROLL_CONFIRM_TIMES);
-  DEBUG_PRINT("[Face] Face detection initialized");
-}
-
-String processFaceDetection(camera_fb_t *fb) {
-  if (!state.faceDetectionEnabled || !fb) return "";
-  
-  unsigned long startTime = millis();
-  
-  // Convert JPEG to RGB888
-  dl_matrix3du_t *image_matrix = dl_matrix3du_alloc(1, fb->width, fb->height, 3);
-  if (!image_matrix) {
-    DEBUG_PRINT("[Face] Failed to allocate image matrix");
-    return "";
-  }
-
-  if (!fmt2rgb888(fb->buf, fb->len, fb->format, image_matrix->item)) {
-    DEBUG_PRINT("[Face] Failed to convert image format");
-    dl_matrix3du_free(image_matrix);
-    return "";
-  }
-  
-  // Detect faces
-  box_array_t *net_boxes = face_detect(image_matrix, &mtmn_config);
-  
-  String detectionResult = "";
-  if (net_boxes && net_boxes->len > 0) {
-    StaticJsonDocument<1024> doc;
-    JsonArray faces = doc.createNestedArray("faces");
-    
-    for (int i = 0; i < net_boxes->len; i++) {
-      JsonObject face = faces.createNestedObject();
-      face["x"] = net_boxes->box[i].box_p[0];
-      face["y"] = net_boxes->box[i].box_p[1]; 
-      face["width"] = net_boxes->box[i].box_p[2] - net_boxes->box[i].box_p[0];
-      face["height"] = net_boxes->box[i].box_p[3] - net_boxes->box[i].box_p[1];
-      face["confidence"] = round(net_boxes->box[i].score * 100) / 100.0;
-    }
-    
-    doc["count"] = net_boxes->len;
-    doc["processing_time"] = millis() - startTime;
-    doc["timestamp"] = millis();
-    
-    serializeJson(doc, detectionResult);
-    free(net_boxes);
-    
-    DEBUG_PRINTF("[Face] Detected %d face(s) in %lu ms\n", net_boxes->len, millis() - startTime);
-  }
-  
-  dl_matrix3du_free(image_matrix);
-  return detectionResult;
-}
-
 // =================== CAMERA FUNCTIONS ===================
 
 bool initCamera() {
-  DEBUG_PRINT("[Camera] Initializing camera with AI features...");
+  DEBUG_PRINT("[Camera] Initializing camera...");
   
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -434,8 +371,6 @@ bool initCamera() {
     s->set_whitebal(s, settings.autoWB);
     s->set_exposure_ctrl(s, settings.autoExposure);
   }
-  
-  initFaceDetection();
   
   DEBUG_PRINT("[Camera] Camera initialized successfully");
   return true;
@@ -630,12 +565,6 @@ void handleSocketIOEvent(const String& eventName, JsonDocument& doc) {
     if (action == "capture") {
       handleCaptureCommand(doc, requestId);
     }
-    else if (action == "setFaceDetection") {
-      state.faceDetectionEnabled = doc["params"]["enabled"] | false;
-      saveConfiguration();
-      sendCommandResponse(requestId, true, action, 
-                         "Face detection " + String(state.faceDetectionEnabled ? "enabled" : "disabled"));
-    }
     else if (action == "setMotionDetection") {
       state.motionDetectionEnabled = doc["params"]["enabled"] | false;
       saveConfiguration();
@@ -679,7 +608,6 @@ void handleSocketIOEvent(const String& eventName, JsonDocument& doc) {
 void handleCaptureCommand(JsonDocument& doc, const String& requestId) {
   bool saveToSD = doc["params"]["saveToSD"] | true;
   int quality = doc["params"]["quality"] | settings.quality;
-  bool detectFaces = doc["params"]["detectFaces"] | state.faceDetectionEnabled;
   
   // Temporarily set quality
   sensor_t * s = esp_camera_sensor_get();
@@ -695,12 +623,6 @@ void handleCaptureCommand(JsonDocument& doc, const String& requestId) {
   }
   
   String filename = "";
-  String faceData = "";
-  
-  // Process face detection
-  if (detectFaces) {
-    faceData = processFaceDetection(fb);
-  }
   
   // Save to SD card
   if (saveToSD && state.sdCardAvailable) {
@@ -713,13 +635,6 @@ void handleCaptureCommand(JsonDocument& doc, const String& requestId) {
   responseData["size"] = fb->len;
   responseData["quality"] = quality;
   responseData["resolution"] = settings.frameSize;
-  
-  if (faceData.length() > 0) {
-    StaticJsonDocument<512> faceDoc;
-    if (deserializeJson(faceDoc, faceData) == DeserializationError::Ok) {
-      responseData["faces"] = faceDoc;
-    }
-  }
   
   String responseStr;
   serializeJson(responseData, responseStr);
@@ -772,7 +687,7 @@ void sendSocketIOEvent(const char* eventName, const String& jsonData) {
   webSocket.sendTXT(eventPayload);
 }
 
-void sendCommandResponse(const String& requestId, bool success, const String& action, const String& message, const String& additionalData = "") {
+void sendCommandResponse(const String& requestId, bool success, const String& action, const String& message, const String& additionalData) {
   StaticJsonDocument<512> response;
   response["requestId"] = requestId;
   response["success"] = success;
@@ -809,7 +724,6 @@ void sendCameraOnline() {
   JsonObject capabilities = doc.createNestedObject("capabilities");
   capabilities["streaming"] = true;
   capabilities["photo_capture"] = true;
-  capabilities["face_detection"] = true;
   capabilities["motion_detection"] = true;
   capabilities["rtmp_streaming"] = true;
   
@@ -831,7 +745,6 @@ void sendCameraStatus() {
   doc["rtmpActive"] = state.rtmpStreamActive;
   doc["resolution"] = settings.frameSize;
   doc["quality"] = settings.quality;
-  doc["faceDetection"] = state.faceDetectionEnabled;
   doc["motionDetection"] = state.motionDetectionEnabled;
   doc["clients"] = state.streamClients;
   doc["uptime"] = millis() / 1000;
@@ -859,14 +772,12 @@ void setupHttpServer() {
     String ssid = httpServer.arg("ssid");
     String password = httpServer.arg("password");
     int quality = httpServer.arg("quality").toInt();
-    bool faceDetection = httpServer.hasArg("faceDetection");
     bool motionDetection = httpServer.hasArg("motionDetection");
     
     writeEEPROMString(WIFI_SSID_ADDR, ssid, 100);
     writeEEPROMString(WIFI_PASS_ADDR, password, 100);
     
     settings.quality = quality;
-    state.faceDetectionEnabled = faceDetection;
     state.motionDetectionEnabled = motionDetection;
     saveConfiguration();
     
@@ -882,7 +793,7 @@ void setupHttpServer() {
     ESP.restart();
   });
   
-  // Status API
+  // Status API with CORS
   httpServer.on("/status", HTTP_GET, []() {
     StaticJsonDocument<512> doc;
     doc["device"] = SERIAL_NUMBER;
@@ -895,7 +806,6 @@ void setupHttpServer() {
     doc["memory"]["free"] = ESP.getFreeHeap();
     doc["memory"]["total"] = ESP.getHeapSize();
     doc["uptime"] = millis() / 1000;
-    doc["features"]["face_detection"] = state.faceDetectionEnabled;
     doc["features"]["motion_detection"] = state.motionDetectionEnabled;
     doc["features"]["sd_card"] = state.sdCardAvailable;
     
@@ -911,9 +821,6 @@ void setupHttpServer() {
   
   // Photo endpoint
   httpServer.on("/photo", HTTP_GET, handlePhotoDownload);
-  
-  // Thumbnail endpoint
-  httpServer.on("/thumbnail", HTTP_GET, handleThumbnailDownload);
   
   // CORS preflight
   httpServer.on("/status", HTTP_OPTIONS, []() {
@@ -985,38 +892,24 @@ void handlePhotoDownload() {
   file.close();
 }
 
-void handleThumbnailDownload() {
-  // For simplicity, return the same image
-  // In production, you might want to generate actual thumbnails
-  handlePhotoDownload();
-}
-
 // =================== MOTION DETECTION ===================
 
 void checkMotion() {
   if (!state.motionDetectionEnabled) return;
 
   static bool lastMotionState = false;
-  static unsigned long lastMotionTime = 0;
   
   bool motionState = digitalRead(MOTION_SENSOR_PIN);
 
-  if (motionState && !lastMotionState && millis() - lastMotionTime > 5000) {
+  if (motionState && !lastMotionState && millis() - state.lastMotionTime > 5000) {
     DEBUG_PRINT("[Motion] Detected!");
-    lastMotionTime = millis();
+    state.lastMotionTime = millis();
     
     // Capture photo if SD card available
     if (state.sdCardAvailable) {
       camera_fb_t * fb = esp_camera_fb_get();
       if (fb) {
         String filename = savePhotoToSD(fb, true);
-        
-        // Process face detection for motion-triggered photo
-        String faceData = "";
-        if (state.faceDetectionEnabled) {
-          faceData = processFaceDetection(fb);
-        }
-        
         esp_camera_fb_return(fb);
         
         // Send notification
@@ -1026,13 +919,6 @@ void checkMotion() {
           doc["type"] = "motion";
           doc["timestamp"] = millis();
           doc["filename"] = filename;
-          
-          if (faceData.length() > 0) {
-            StaticJsonDocument<512> faceDoc;
-            if (deserializeJson(faceDoc, faceData) == DeserializationError::Ok) {
-              doc["faces"] = faceDoc;
-            }
-          }
           
           String jsonString;
           serializeJson(doc, jsonString);
@@ -1052,10 +938,10 @@ void setup() {
   Serial.setDebugOutput(false);
   
   DEBUG_PRINT("\n==============================");
-  DEBUG_PRINT("🎥 ESP32-CAM Advanced v1.4.0");
+  DEBUG_PRINT("🎥 ESP32-CAM Advanced v1.5.0");
   DEBUG_PRINT("==============================");
   DEBUG_PRINTF("Device: %s\n", SERIAL_NUMBER);
-  DEBUG_PRINTF("Features: Face Detection, Motion Detection, RTMP\n");
+  DEBUG_PRINTF("Features: Video Streaming, Motion Detection, RTMP\n");
   DEBUG_PRINTF("Free Heap: %d bytes\n", ESP.getFreeHeap());
   
   // Initialize hardware
@@ -1134,12 +1020,6 @@ void loop() {
         state.lastStatusUpdate = currentTime;
         DEBUG_PRINTF("[Status] Free heap: %d bytes\n", ESP.getFreeHeap());
       }
-    } else if (currentTime - state.lastStatusUpdate > 30000) {
-      DEBUG_PRINTF("[Status] Connection state - Connected: %s, Namespace: %s, Online sent: %s\n", 
-                   state.isConnected ? "YES" : "NO",
-                   state.namespaceConnected ? "YES" : "NO", 
-                   state.cameraOnlineSent ? "YES" : "NO");
-      state.lastStatusUpdate = currentTime;
     }
   }
   
@@ -1157,6 +1037,5 @@ void loop() {
     state.lastWatchdog = currentTime;
   }
   
-  // Small delay to prevent watchdog issues
   delay(10);
 }
