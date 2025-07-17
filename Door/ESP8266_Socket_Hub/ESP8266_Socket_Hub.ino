@@ -1,5 +1,5 @@
 // ========================================
-// ESP8266 SOCKET HUB v4.2.0 - WITH UDP CONFIG + GARDEN SUPPORT
+// ESP8266 SOCKET HUB v5.0.0 - GARDEN CONTROL ONLY
 // ========================================
 
 #include <ESP8266WiFi.h>
@@ -16,8 +16,8 @@ String WEBSOCKET_HOST = "iothomeconnectapiv2-production.up.railway.app";
 uint16_t WEBSOCKET_PORT = 443;
 
 String HUB_SERIAL = "SERL29JUN2501JYXECBR32V8BD77RW82";
-#define FIRMWARE_VERSION "4.2.0"
-#define HUB_ID "ESP_HUB_OPT_001"
+#define FIRMWARE_VERSION "5.0.0"
+#define HUB_ID "ESP_HUB_GARDEN_001"
 
 // ✅ EEPROM ADDRESSES
 #define EEPROM_SIZE 512
@@ -34,25 +34,29 @@ bool configMode = false;
 unsigned long configModeStart = 0;
 const unsigned long CONFIG_TIMEOUT = 300000; // 5 minutes
 
-// ✅ MANAGED DEVICES
+// ✅ GARDEN MANAGED DEVICES (Hard-coded serials for demo)
 String managedDevices[] = {
-  "SERL27JUN2501JYR2RKVVX08V40YMGTW",  // Door 1
-  "SERL27JUN2501JYR2RKVR0SC7SJ8P8DD",  // Door 2
-  "SERL27JUN2501JYR2RKVRNHS46VR6AS1",  // Door 3
-  "SERL27JUN2501JYR2RKVSE2RW7KQ4KMP",  // Door 4
-  "SERL27JUN2501JYR2RKVTBZ40JPF88WP",  // Door 5
-  "SERL27JUN2501JYR2RKVTXNCK1GB3HBZ",  // Door 6
-  "SERL27JUN2501JYR2RKVS2P6XBVF1P2E",  // Door 7
-  "SERL27JUN2501JYR2RKVTH6PWR9ETXC2",  // Door 8
-  "SERL27JUN2501JYR2RKVVSBGRTM0TRFW",  // Door 9
-  "MEGA27JUN2501GARDEN_HUB_001"        // Garden Hub
+  "MEGA27JUN2501GARDEN_HUB_001",           // Arduino Mega Garden Hub
+  "RELAY27JUN2501FAN001CONTROL001",        // Fan Relay
+  "RELAY27JUN2501ALARM01CONTROL01",        // Alarm Relay
+  "RELAY27JUN2501LIGHT001CONTROL1",        // Light1 Relay
+  "RELAY27JUN2501LIGHT002CONTROL1",        // Light2 Relay
+  "RELAY27JUN2501PUMP002CONTROL01",        // Pump2 Relay
+  "RELAY27JUN2501HEATER1CONTROL01",        // Heater Relay
+  "RELAY27JUN2501COOLER1CONTROL01",        // Cooler Relay
+  "RELAY27JUN2501RESERVE8CONTROL1"         // Reserve Relay
 };
-const int TOTAL_MANAGED_DEVICES = 10;
+const int TOTAL_MANAGED_DEVICES = 9;
 
 WebSocketsClient webSocket;
 bool socketConnected = false;
 unsigned long lastPingResponse = 0;
 bool devicesRegistered = false;
+
+// ✅ GARDEN COMMUNICATION
+bool gardenHubConnected = false;
+unsigned long lastGardenMessage = 0;
+const unsigned long GARDEN_TIMEOUT = 120000; // 2 minutes
 
 // ✅ LED BUILTIN (ESP8266 LED is active LOW)
 #ifndef LED_BUILTIN
@@ -63,10 +67,11 @@ void setup() {
   Serial.begin(115200);
   delay(1500);
   
-  Serial.println("\n=== ESP Socket Hub v4.2.0 (UDP CONFIG + GARDEN) ===");
+  Serial.println("\n=== ESP Socket Hub v5.0.0 (GARDEN CONTROL ONLY) ===");
   Serial.println("Hub: " + HUB_SERIAL);
   Serial.println("ID: " + String(HUB_ID));
-  Serial.println("Managing " + String(TOTAL_MANAGED_DEVICES) + " devices");
+  Serial.println("Garden System: Arduino Mega Garden Hub + 8 Relays");
+  Serial.println("Managing " + String(TOTAL_MANAGED_DEVICES) + " garden devices");
   Serial.println("Free Heap: " + String(ESP.getFreeHeap()));
   
   // ✅ INITIALIZE EEPROM
@@ -96,7 +101,7 @@ void setup() {
     }
   }
   
-  Serial.println("Hub Ready - Enhanced Stability + Garden Support");
+  Serial.println("Garden Hub Ready - Connected to Arduino Mega");
   Serial.println("Config Mode: Hold GPIO0 during boot");
   Serial.println("===============================================\n");
 }
@@ -109,7 +114,7 @@ void startConfigMode() {
   Serial.println("[CONFIG] Starting WiFi AP for configuration...");
   
   // Create AP
-  String apName = "ESP_HUB_" + String(HUB_ID);
+  String apName = "ESP_GARDEN_" + String(HUB_ID);
   WiFi.mode(WIFI_AP);
   WiFi.softAP(apName.c_str(), "12345678");
   
@@ -143,12 +148,12 @@ void handleConfigPage() {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ESP Socket Hub Config</title>
+    <title>ESP Garden Hub Config</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { 
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: linear-gradient(135deg, #4CAF50 0%, #81C784 100%);
             min-height: 100vh; padding: 20px; color: #333;
         }
         .container { 
@@ -159,7 +164,7 @@ void handleConfigPage() {
         }
         @keyframes slideUp { from { opacity: 0; transform: translateY(30px); } }
         .header { 
-            background: linear-gradient(135deg, #FF6B35, #F7931E);
+            background: linear-gradient(135deg, #4CAF50, #66BB6A);
             color: white; padding: 25px; text-align: center;
         }
         .header h1 { font-size: 24px; margin-bottom: 8px; }
@@ -175,16 +180,16 @@ void handleConfigPage() {
             border-radius: 8px; font-size: 16px; transition: all 0.3s;
         }
         .field input:focus { 
-            outline: none; border-color: #FF6B35; 
-            box-shadow: 0 0 0 3px rgba(255,107,53,0.1);
+            outline: none; border-color: #4CAF50; 
+            box-shadow: 0 0 0 3px rgba(76,175,80,0.1);
         }
         .btn { 
-            width: 100%; padding: 15px; background: linear-gradient(135deg, #FF6B35, #F7931E);
+            width: 100%; padding: 15px; background: linear-gradient(135deg, #4CAF50, #66BB6A);
             color: white; border: none; border-radius: 8px; 
             font-size: 16px; font-weight: 600; cursor: pointer;
             transition: all 0.3s; margin-top: 10px;
         }
-        .btn:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(255,107,53,0.3); }
+        .btn:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(76,175,80,0.3); }
         .status { 
             padding: 15px; margin: 15px 0; border-radius: 8px; 
             text-align: center; font-weight: 600;
@@ -192,7 +197,7 @@ void handleConfigPage() {
         .success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
         .error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
         .info { 
-            background: #fff3cd; color: #856404; border: 1px solid #ffeaa7;
+            background: #e8f5e8; color: #2e7d32; border: 1px solid #c8e6c9;
             margin-bottom: 20px; padding: 15px; border-radius: 8px;
         }
         .stats {
@@ -208,25 +213,26 @@ void handleConfigPage() {
 <body>
     <div class="container">
         <div class="header">
-            <h1>🌐 Socket Hub Config</h1>
-            <p>ESP8266 WiFi Configuration</p>
+            <h1>🌱 Garden Hub Config</h1>
+            <p>ESP8266 Garden Control System</p>
         </div>
         
         <div class="form">
             <div class="stats">
-                <strong>📊 Hub Information:</strong><br>
+                <strong>🌿 Garden Hub Information:</strong><br>
                 Serial: )" + HUB_SERIAL + R"(<br>
                 Version: )" + String(FIRMWARE_VERSION) + R"(<br>
-                Managed Devices: )" + String(TOTAL_MANAGED_DEVICES) + R"(<br>
+                Garden Devices: )" + String(TOTAL_MANAGED_DEVICES) + R"(<br>
                 Free Heap: )" + String(ESP.getFreeHeap()) + R"( bytes
             </div>
             
             <div class="info">
-                <strong>📋 Instructions:</strong><br>
-                1. Connect to this WiFi network<br>
-                2. Enter your home WiFi credentials<br>
-                3. Optionally update hub serial<br>
-                4. Click Save to apply settings
+                <strong>🌱 Garden System Features:</strong><br>
+                1. Arduino Mega Garden Hub Control<br>
+                2. 8-Channel Relay Control (Fan, Lights, Pump, etc.)<br>
+                3. Garden Sensor Monitoring<br>
+                4. RGB LED Status Indication<br>
+                5. LCD & OLED Display Support
             </div>
             
             <div id="status"></div>
@@ -250,12 +256,12 @@ void handleConfigPage() {
                            placeholder="Leave empty to keep current">
                 </div>
                 
-                <button type="submit" class="btn">💾 Save Configuration</button>
+                <button type="submit" class="btn">🌱 Save Garden Config</button>
             </form>
         </div>
         
         <div class="footer">
-            ESP Socket Hub v4.2.0 | Hub will restart after saving
+            ESP Garden Hub v5.0.0 | Connected to Arduino Mega
         </div>
     </div>
 
@@ -282,7 +288,7 @@ void handleConfigPage() {
             
             submitBtn.disabled = true;
             submitBtn.textContent = '⏳ Saving...';
-            statusDiv.innerHTML = '<div class="status">⏳ Saving configuration...</div>';
+            statusDiv.innerHTML = '<div class="status">⏳ Saving garden hub configuration...</div>';
             
             try {
                 const response = await fetch('/save', {
@@ -295,17 +301,17 @@ void handleConfigPage() {
                 if (result.success) {
                     statusDiv.innerHTML = '<div class="status success">✅ ' + result.message + '</div>';
                     setTimeout(() => {
-                        statusDiv.innerHTML = '<div class="status">🔄 Hub is restarting... Please reconnect to your home WiFi.</div>';
+                        statusDiv.innerHTML = '<div class="status">🔄 Garden Hub restarting... Please reconnect to your home WiFi.</div>';
                     }, 2000);
                 } else {
                     statusDiv.innerHTML = '<div class="status error">❌ ' + result.message + '</div>';
                     submitBtn.disabled = false;
-                    submitBtn.textContent = '💾 Save Configuration';
+                    submitBtn.textContent = '🌱 Save Garden Config';
                 }
             } catch (error) {
                 statusDiv.innerHTML = '<div class="status error">❌ Connection error: ' + error.message + '</div>';
                 submitBtn.disabled = false;
-                submitBtn.textContent = '💾 Save Configuration';
+                submitBtn.textContent = '🌱 Save Garden Config';
             }
         });
         
@@ -337,9 +343,9 @@ void handleSaveConfig() {
       saveWiFiConfig(newSSID, newPassword, newSerial);
       
       success = true;
-      response = "{\"success\":true,\"message\":\"Configuration saved successfully! Hub will restart in 3 seconds.\"}";
+      response = "{\"success\":true,\"message\":\"Garden hub configuration saved! Restarting in 3 seconds.\"}";
       
-      Serial.println("[CONFIG] ✓ Web config saved");
+      Serial.println("[CONFIG] ✓ Garden hub config saved");
       Serial.println("[CONFIG] SSID: " + newSSID);
       if (newSerial.length() > 0) {
         Serial.println("[CONFIG] New Serial: " + newSerial);
@@ -362,10 +368,11 @@ void handleSaveConfig() {
 
 void handleStatus() {
   StaticJsonDocument<256> doc;
-  doc["device_type"] = "ESP_SOCKET_HUB";
+  doc["device_type"] = "ESP_GARDEN_HUB";
   doc["hub_serial"] = HUB_SERIAL;
   doc["firmware_version"] = FIRMWARE_VERSION;
   doc["managed_devices"] = TOTAL_MANAGED_DEVICES;
+  doc["garden_connected"] = gardenHubConnected;
   doc["uptime"] = millis();
   doc["free_heap"] = ESP.getFreeHeap();
   doc["wifi_connected"] = WiFi.status() == WL_CONNECTED;
@@ -427,12 +434,12 @@ void handleUDPConfig() {
           
           saveWiFiConfig(newSSID, newPassword, newSerial);
           
-          String response = "{\"success\":true,\"message\":\"WiFi config saved, restarting...\"}";
+          String response = "{\"success\":true,\"message\":\"Garden hub config saved, restarting...\"}";
           udp.beginPacket(udp.remoteIP(), udp.remotePort());
           udp.write(response.c_str());
           udp.endPacket();
           
-          Serial.println("[CONFIG] ✓ UDP Config saved, restarting...");
+          Serial.println("[CONFIG] ✓ UDP Garden config saved, restarting...");
           delay(2000);
           ESP.restart();
         } else {
@@ -463,7 +470,7 @@ void saveWiFiConfig(String ssid, String password, String serial) {
   EEPROM.write(WIFI_CONFIG_FLAG_ADDR, 0xAB);
   EEPROM.commit();
   
-  Serial.println("[CONFIG] WiFi config saved to EEPROM");
+  Serial.println("[CONFIG] Garden hub config saved to EEPROM");
 }
 
 bool loadWiFiConfig() {
@@ -521,7 +528,7 @@ void setupWiFi() {
 
 void setupWebSocket() {
   String path = "/socket.io/?EIO=3&transport=websocket&serialNumber=" + 
-                HUB_SERIAL + "&isIoTDevice=true&hub_managed=true&optimized=true";
+                HUB_SERIAL + "&isIoTDevice=true&hub_managed=true&optimized=true&garden_hub=true";
   
   Serial.println("[WS] Connecting to " + WEBSOCKET_HOST + ":" + String(WEBSOCKET_PORT));
   
@@ -530,11 +537,11 @@ void setupWebSocket() {
   webSocket.setReconnectInterval(5000);
   webSocket.enableHeartbeat(25000, 5000, 2);
   
-  String userAgent = "ESP-Hub-Opt/4.2.0";
+  String userAgent = "ESP-Garden-Hub/5.0.0";
   String headers = "User-Agent: " + userAgent;
   webSocket.setExtraHeaders(headers.c_str());
   
-  Serial.println("[WS] Setup complete");
+  Serial.println("[WS] Garden hub setup complete");
 }
 
 void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
@@ -546,7 +553,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
       break;
       
     case WStype_CONNECTED:
-      Serial.println("[WS] ✓ CONNECTED Hub:" + HUB_SERIAL);
+      Serial.println("[WS] ✓ CONNECTED Garden Hub:" + HUB_SERIAL);
       socketConnected = true;
       lastPingResponse = millis();
       devicesRegistered = false;
@@ -570,49 +577,51 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
 void registerManagedDevices() {
   if (devicesRegistered || !socketConnected) return;
   
-  Serial.println("[REGISTER] Registering " + String(TOTAL_MANAGED_DEVICES) + " devices...");
+  Serial.println("[REGISTER] Registering " + String(TOTAL_MANAGED_DEVICES) + " garden devices...");
   
-  for (int i = 0; i < TOTAL_MANAGED_DEVICES - 1; i++) { // Skip garden hub in loop
+  // Register Arduino Mega Garden Hub
+  StaticJsonDocument<512> megaDoc;
+  megaDoc["deviceId"] = "MEGA27JUN2501GARDEN_HUB_001";
+  megaDoc["serialNumber"] = "MEGA27JUN2501GARDEN_HUB_001";
+  megaDoc["deviceType"] = "MEGA_GARDEN_HUB";
+  megaDoc["hub_controlled"] = true;
+  megaDoc["hub_serial"] = HUB_SERIAL;
+  megaDoc["connection_type"] = "serial_via_garden_hub";
+  megaDoc["firmware_version"] = "3.0.0";
+  megaDoc["garden_system"] = true;
+
+  String megaPayload;
+  serializeJson(megaDoc, megaPayload);
+  String megaFullPayload = "42[\"device_online\"," + megaPayload + "]";
+  webSocket.sendTXT(megaFullPayload);
+  
+  Serial.println("[REGISTER] Arduino Mega Garden Hub: MEGA27JUN2501GARDEN_HUB_001");
+  delay(100);
+  
+  // Register 8 Relay devices
+  for (int i = 1; i < TOTAL_MANAGED_DEVICES; i++) {
     StaticJsonDocument<512> doc;
     doc["deviceId"] = managedDevices[i];
     doc["serialNumber"] = managedDevices[i];
-    doc["deviceType"] = "ESP01_SERVO_DOOR";
+    doc["deviceType"] = "GARDEN_RELAY_DEVICE";
     doc["hub_controlled"] = true;
     doc["hub_serial"] = HUB_SERIAL;
-    doc["connection_type"] = "esp_now_via_hub";
-    doc["door_id"] = i + 1;
-    doc["firmware_version"] = "3.2.0";
-    doc["esp01_device"] = true;
+    doc["connection_type"] = "relay_via_garden_hub";
+    doc["relay_id"] = i;
+    doc["firmware_version"] = "3.0.0";
+    doc["garden_device"] = true;
 
     String payload;
     serializeJson(doc, payload);
     String fullPayload = "42[\"device_online\"," + payload + "]";
     webSocket.sendTXT(fullPayload);
     
-    Serial.println("[REGISTER] Door " + String(i + 1) + ": " + managedDevices[i]);
+    Serial.println("[REGISTER] Relay " + String(i) + ": " + managedDevices[i]);
     delay(100);
   }
   
-  // Register garden hub separately
-  StaticJsonDocument<512> gardenDoc;
-  gardenDoc["deviceId"] = "MEGA27JUN2501GARDEN_HUB_001";
-  gardenDoc["serialNumber"] = "MEGA27JUN2501GARDEN_HUB_001";
-  gardenDoc["deviceType"] = "MEGA_GARDEN_HUB";
-  gardenDoc["hub_controlled"] = true;
-  gardenDoc["hub_serial"] = HUB_SERIAL;
-  gardenDoc["connection_type"] = "serial_via_hub";
-  gardenDoc["firmware_version"] = "3.1.0";
-  gardenDoc["garden_system"] = true;
-
-  String gardenPayload;
-  serializeJson(gardenDoc, gardenPayload);
-  String gardenFullPayload = "42[\"device_online\"," + gardenPayload + "]";
-  webSocket.sendTXT(gardenFullPayload);
-  
-  Serial.println("[REGISTER] Garden Hub: MEGA27JUN2501GARDEN_HUB_001");
-  
   devicesRegistered = true;
-  Serial.println("[REGISTER] ✓ Complete");
+  Serial.println("[REGISTER] ✅ Garden devices registration complete");
 }
 
 void handleWebSocketMessage(String message) {
@@ -661,7 +670,7 @@ void handleSocketIOEvent(String eventData) {
     parseAndExecuteCommand(eventData);
     
   } else if (eventData.indexOf("ping") != -1) {
-    String pongPayload = "42[\"pong\",{\"timestamp\":" + String(millis()) + ",\"hub_serial\":\"" + HUB_SERIAL + "\"}]";
+    String pongPayload = "42[\"pong\",{\"timestamp\":" + String(millis()) + ",\"hub_serial\":\"" + HUB_SERIAL + "\",\"garden_hub\":true}]";
     webSocket.sendTXT(pongPayload);
     lastPingResponse = millis();
   }
@@ -677,54 +686,73 @@ void parseAndExecuteCommand(String eventData) {
   JsonDocument doc;
   if (deserializeJson(doc, jsonString) != DeserializationError::Ok) return;
   
-  // ✅ NEW: Handle different command types
+  // ✅ GARDEN COMMAND PROCESSING
   String action = doc["action"].is<String>() ? doc["action"].as<String>() : "";
-  String targetSerial = doc["serialNumber"].is<String>() ? doc["serialNumber"].as<String>() : "";
   String command = doc["command"].is<String>() ? doc["command"].as<String>() : "";
   String target = doc["target"].is<String>() ? doc["target"].as<String>() : "";
   
-  Serial.println("[CMD] Action: " + action + " | Target: " + target + " | Command: " + command);
+  Serial.println("[GARDEN-CMD] Action: " + action + " | Target: " + target + " | Command: " + command);
   
-  // ✅ GARDEN COMMANDS
-  if (action == "garden_command" || action == "garden_pump" || action == "garden_rgb" || 
-      action == "garden_automation" || action == "garden_threshold" || target.startsWith("mega_")) {
-    
+  // ✅ GARDEN PUMP COMMANDS
+  if (action == "garden_command" || action == "garden_pump" || target.startsWith("mega_")) {
     if (command.length() > 0) {
-      Serial.println("[GARDEN] Forward to Mega: " + command);
-      Serial.println(command); // Send to Mega via Serial
+      Serial.println("[GARDEN] → Mega: " + command);
+      Serial.println(command); // Send to Arduino Mega via Serial
     } else if (action == "garden_pump") {
       String pumpAction = doc["pump_action"].as<String>();
-      Serial.println("GARDEN_CMD:PUMP_" + pumpAction);
-    } else if (action == "garden_rgb") {
-      String rgbAction = doc["rgb_action"].as<String>();
-      Serial.println("GARDEN_CMD:RGB_" + rgbAction);
+      String cmd = "CMD:GARDEN:PUMP_" + pumpAction;
+      Serial.println("[GARDEN] → Mega: " + cmd);
+      Serial.println(cmd);
     }
     return;
   }
   
-  // ✅ RELAY COMMANDS
-  if (action == "relay_command" || action == "emergency_alarm" || target == "mega_relay" || target == "mega_alarm") {
+  // ✅ GARDEN RELAY COMMANDS
+  if (action == "relay_command" || target == "mega_relay") {
     if (command.length() > 0) {
-      Serial.println("[RELAY] Forward to Mega: " + command);
-      Serial.println(command); // Send to Mega via Serial
+      Serial.println("[RELAY] → Mega: " + command);
+      Serial.println(command); // Send to Arduino Mega via Serial
     }
     return;
   }
   
-  // ✅ DOOR COMMANDS (original logic)
-  if (targetSerial == "" || action == "") return;
-  
-  bool isManaged = false;
-  for (int i = 0; i < TOTAL_MANAGED_DEVICES - 1; i++) { // Skip garden hub
-    if (managedDevices[i] == targetSerial) {
-      isManaged = true;
-      break;
-    }
+  // ✅ GARDEN RGB COMMANDS
+  if (action == "garden_rgb" || target == "mega_garden") {
+    String rgbAction = doc["rgb_action"].as<String>();
+    String cmd = "CMD:GARDEN:RGB_" + rgbAction;
+    Serial.println("[RGB] → Mega: " + cmd);
+    Serial.println(cmd);
+    return;
   }
   
-  if (isManaged) {
-    Serial.println("[DOOR] ✓ " + targetSerial + " -> " + action);
-    Serial.println("CMD:" + targetSerial + ":" + action);
+  // ✅ GARDEN AUTOMATION COMMANDS
+  if (action == "garden_automation") {
+    String automationType = doc["automation_type"].as<String>();
+    String cmd = "CMD:GARDEN:AUTO_" + automationType + "_TOGGLE";
+    Serial.println("[AUTO] → Mega: " + cmd);
+    Serial.println(cmd);
+    return;
+  }
+  
+  // ✅ GARDEN THRESHOLD COMMANDS
+  if (action == "garden_threshold") {
+    String thresholdType = doc["threshold_type"].as<String>();
+    int value = doc["value"].as<int>();
+    String cmd = "CMD:GARDEN:SET_" + thresholdType + "_THRESHOLD:" + String(value);
+    Serial.println("[THRESHOLD] → Mega: " + cmd);
+    Serial.println(cmd);
+    return;
+  }
+  
+  // ✅ EMERGENCY ALARM COMMANDS
+  if (action == "emergency_alarm" || target == "mega_alarm") {
+    String alarmAction = doc["alarm_action"].as<String>();
+    String relaySerial = doc["relay_serial"].as<String>();
+    String cmd = "CMD:" + relaySerial + ":" + (alarmAction == "ACTIVATE" ? "ON" : 
+                alarmAction == "DEACTIVATE" ? "OFF" : "RESET_OVERRIDE");
+    Serial.println("[ALARM] → Mega: " + cmd);
+    Serial.println(cmd);
+    return;
   }
 }
 
@@ -734,19 +762,20 @@ void sendDeviceOnline() {
   StaticJsonDocument<512> doc;
   doc["deviceId"] = HUB_SERIAL;
   doc["serialNumber"] = HUB_SERIAL;
-  doc["deviceType"] = "HUB_GATEWAY_OPT";
+  doc["deviceType"] = "GARDEN_HUB_GATEWAY";
   doc["firmware_version"] = FIRMWARE_VERSION;
   doc["hub_managed"] = true;
   doc["hub_id"] = HUB_ID;
-  doc["connection_type"] = "hub_optimized";
+  doc["connection_type"] = "garden_hub_optimized";
   doc["managed_devices_count"] = TOTAL_MANAGED_DEVICES;
   doc["garden_support"] = true;
+  doc["garden_only"] = true;
 
   String payload;
   serializeJson(doc, payload);
   String fullPayload = "42[\"device_online\"," + payload + "]";
   webSocket.sendTXT(fullPayload);
-  Serial.println("[ONLINE] Hub registered with garden support");
+  Serial.println("[ONLINE] Garden Hub registered with " + String(TOTAL_MANAGED_DEVICES) + " devices");
 }
 
 void checkConnectionStatus() {
@@ -768,7 +797,7 @@ void checkConnectionStatus() {
       ESP.restart();
     }
     
-    Serial.println("[RECONNECT] Attempt " + String(reconnectAttempts + 1));
+    Serial.println("[RECONNECT] Garden hub attempt " + String(reconnectAttempts + 1));
     
     webSocket.disconnect();
     delay(2000);
@@ -787,6 +816,13 @@ void checkConnectionStatus() {
   }
 }
 
+void checkGardenConnection() {
+  if (gardenHubConnected && millis() - lastGardenMessage > GARDEN_TIMEOUT) {
+    gardenHubConnected = false;
+    Serial.println("[GARDEN] ✗ Arduino Mega timeout - connection lost");
+  }
+}
+
 void loop() {
   // Handle config mode
   if (configMode) {
@@ -797,6 +833,7 @@ void loop() {
   // Normal operation
   webSocket.loop();
   checkConnectionStatus();
+  checkGardenConnection();
   
   // Manual ping
   static unsigned long lastManualPing = 0;
@@ -805,79 +842,92 @@ void loop() {
     lastManualPing = millis();
   }
 
-  // ✅ ENHANCED: Handle MEGA responses (including garden data)
+  // ✅ HANDLE ARDUINO MEGA GARDEN RESPONSES
   if (Serial.available()) {
     String response = Serial.readStringUntil('\n');
     response.trim();
     
     if (response.length() == 0) return;
     
-    // Filter out status messages to prevent flooding
-    if (response.startsWith("HUB_") || 
-        response.startsWith("ATMEGA_") ||
-        response.indexOf("STATUS") != -1 ||
-        response.startsWith("[")) {
+    // Update garden connection status
+    gardenHubConnected = true;
+    lastGardenMessage = millis();
+    
+    // Filter out debug messages to prevent flooding
+    if (response.startsWith("[") || 
+        response.indexOf("DEBUG") != -1 ||
+        response.indexOf("INIT") != -1 ||
+        response.startsWith("===")) {
       return;
     }
     
     Serial.println("[MEGA-RX] " + response);
     
-    // ✅ GARDEN DATA FORWARDING
+    // ✅ GARDEN DATA FORWARDING TO SERVER
     if (response.startsWith("GARDEN_DATA:")) {
       String json = response.substring(12);
       String payload = "42[\"garden_sensor_data\"," + json + "]";
       webSocket.sendTXT(payload);
+      Serial.println("[→SERVER] Garden sensor data forwarded");
       
     } else if (response.startsWith("GARDEN_STATUS:")) {
       String json = response.substring(14);
       String payload = "42[\"garden_automation_status\"," + json + "]";
       webSocket.sendTXT(payload);
-      
-    } else if (response.startsWith("GARDEN_HEALTH:")) {
-      String json = response.substring(14);
-      String payload = "42[\"garden_system_health\"," + json + "]";
-      webSocket.sendTXT(payload);
+      Serial.println("[→SERVER] Garden automation status forwarded");
       
     } else if (response.startsWith("PUMP_RESPONSE:")) {
       String json = response.substring(14);
       String payload = "42[\"pump_response\"," + json + "]";
       webSocket.sendTXT(payload);
+      Serial.println("[→SERVER] Pump response forwarded");
       
-    } else if (response.startsWith("GARDEN_RESPONSE:")) {
-      String json = response.substring(16);
-      String payload = "42[\"garden_command_response\"," + json + "]";
+    } else if (response.startsWith("RGB_STATUS:")) {
+      String json = response.substring(11);
+      String payload = "42[\"rgb_status_update\"," + json + "]";
       webSocket.sendTXT(payload);
+      Serial.println("[→SERVER] RGB status forwarded");
+      
+    } else if (response.startsWith("RELAY_STATUS:")) {
+      String json = response.substring(13);
+      String payload = "42[\"relay_status_update\"," + json + "]";
+      webSocket.sendTXT(payload);
+      Serial.println("[→SERVER] Relay status forwarded");
       
     } else if (response.startsWith("GARDEN_AUTOMATION:")) {
       String json = response.substring(18);
       String payload = "42[\"garden_automation_status\"," + json + "]";
       webSocket.sendTXT(payload);
+      Serial.println("[→SERVER] Garden automation forwarded");
       
-    } else if (response.startsWith("GARDEN_ONLINE:")) {
+    } else if (response.startsWith("GARDEN_HEALTH:")) {
       String json = response.substring(14);
-      String payload = "42[\"device_online\"," + json + "]";
+      String payload = "42[\"garden_system_health\"," + json + "]";
       webSocket.sendTXT(payload);
+      Serial.println("[→SERVER] Garden health forwarded");
       
-    // ✅ DOOR/RELAY RESPONSES (original)
     } else if (response.startsWith("RESP:")) {
       String json = response.substring(5);
       String payload = "42[\"command_response\"," + json + "]";
       webSocket.sendTXT(payload);
+      Serial.println("[→SERVER] Command response forwarded");
       
     } else if (response.startsWith("STS:")) {
       String json = response.substring(4);
       String payload = "42[\"deviceStatus\"," + json + "]";
       webSocket.sendTXT(payload);
+      Serial.println("[→SERVER] Device status forwarded");
     }
   }
   
   // Status print
   static unsigned long lastStatus = 0;
   if (millis() - lastStatus > 60000) {
-    Serial.println("[STATUS] Connected:" + String(socketConnected) + 
+    Serial.println("[STATUS] Garden Hub - Socket:" + String(socketConnected) + 
+                   " | Garden:" + String(gardenHubConnected) +
                    " | Heap:" + String(ESP.getFreeHeap()) + 
                    " | Uptime:" + String(millis() / 1000) + "s" +
-                   " | Garden:ENABLED | Config: Hold GPIO0 at boot");
+                   " | Devices:" + String(TOTAL_MANAGED_DEVICES));
     lastStatus = millis();
   }
   
